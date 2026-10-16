@@ -11,6 +11,7 @@ celery_app = Celery(
     broker=settings.redis_url,
     include=["company_ai.tasks.ai_tasks", "company_ai.tasks.maintenance_tasks"],
 )
+
 celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=False,
