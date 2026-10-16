@@ -1,0 +1,23 @@
+import json
+import logging
+from datetime import UTC, datetime
+
+
+def log_event(event, **fields):
+    # Only call with identifiers, fixed categories, and numeric metadata.
+    logging.getLogger("company_ai").info(
+        json.dumps(
+            {
+                "timestamp": datetime.now(UTC).isoformat(),
+                "service": "company-ai",
+                "event": event,
+                **fields,
+            }
+        )
+    )
+
+
+def configure_logging(level="INFO"):
+    logging.basicConfig(level=level, format="%(message)s")
+    for name in ("httpx", "httpcore", "openai", "crewai", "LiteLLM"):
+        logging.getLogger(name).setLevel(logging.CRITICAL)

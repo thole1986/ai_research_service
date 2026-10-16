@@ -1,0 +1,13 @@
+.venv/
+.uv-cache/
+.env
+*.db
+*.db-*
+data/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+celerybeat-schedule*
+dist/
+

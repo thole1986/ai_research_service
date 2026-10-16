@@ -1,0 +1,13 @@
+# Standalone service. See docs/compose-services.vi.md for startup order.
+name: ${COMPOSE_PROJECT_NAME:-ai_research_service}
+services:
+  verification:
+    extra_hosts:
+    - host.docker.internal:host-gateway
+    build:
+      context: .
+      dockerfile: docker/verification/Dockerfile
+    environment:
+      CREWAI_TELEMETRY_DISABLED: 'true'
+      OTEL_SDK_DISABLED: 'true'
+      CREWAI_STORAGE_DIR: /app/data/crewai-tests

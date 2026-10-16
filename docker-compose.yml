@@ -1,0 +1,57 @@
+# Aggregate stack; service definitions live in docker-compose.<service>.yml.
+name: ${COMPOSE_PROJECT_NAME:-ai_research_service}
+services:
+  migrate:
+    extends:
+      file: docker-compose.migrate.yml
+      service: migrate
+  api:
+    extends:
+      file: docker-compose.api.yml
+      service: api
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  ai-worker:
+    extends:
+      file: docker-compose.ai-worker.yml
+      service: ai-worker
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  maintenance-worker:
+    extends:
+      file: docker-compose.maintenance-worker.yml
+      service: maintenance-worker
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  beat:
+    extends:
+      file: docker-compose.beat.yml
+      service: beat
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  verification:
+    extends:
+      file: docker-compose.verification.yml
+      service: verification
+    profiles:
+    - test
+  redis:
+    extends:
+      file: docker-compose.redis.yml
+      service: redis
+    profiles:
+    - bundled-redis
+  postgres:
+    extends:
+      file: docker-compose.postgres.yml
+      service: postgres
+    profiles:
+    - bundled-postgres
+volumes:
+  redis-data: null
+  app-data: null
+  postgres-data: null

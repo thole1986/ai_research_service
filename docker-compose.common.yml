@@ -1,0 +1,20 @@
+# Shared application template; use a service file or docker-compose.yml to run.
+services:
+  app:
+    env_file:
+    - path: .env
+      required: false
+    environment:
+      DATABASE_URL: ${CONTAINER_DATABASE_URL:-}
+      POSTGRES_HOST: ${CONTAINER_POSTGRES_HOST:-host.docker.internal}
+      REDIS_URL: ${CONTAINER_REDIS_URL:-redis://host.docker.internal:6379/0}
+      CREWAI_STORAGE_DIR: /app/data/crewai
+      CREWAI_TELEMETRY_DISABLED: 'true'
+      OTEL_SDK_DISABLED: 'true'
+    volumes:
+    - app-data:/app/data
+    extra_hosts:
+    - host.docker.internal:host-gateway
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 120s

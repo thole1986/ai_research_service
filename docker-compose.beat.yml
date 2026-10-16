@@ -1,0 +1,12 @@
+# Standalone service. See docs/compose-services.vi.md for startup order.
+name: ${COMPOSE_PROJECT_NAME:-ai_research_service}
+services:
+  beat:
+    extends:
+      file: docker-compose.common.yml
+      service: app
+    build:
+      context: .
+      dockerfile: docker/beat/Dockerfile
+volumes:
+  app-data: null

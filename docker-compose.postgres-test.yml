@@ -1,0 +1,17 @@
+# Isolated ephemeral test database; never shares application data volumes.
+services:
+  postgres-test:
+    build:
+      context: .
+      dockerfile: docker/postgres/Dockerfile
+    environment:
+      POSTGRES_DB: company_ai_test
+      POSTGRES_USER: company_ai_test
+      POSTGRES_PASSWORD: local-test-only
+    ports: ["127.0.0.1:${TEST_POSTGRES_PORT:-55432}:5432"]
+    tmpfs: ["/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U company_ai_test -d company_ai_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

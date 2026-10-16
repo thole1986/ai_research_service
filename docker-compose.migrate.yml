@@ -1,0 +1,13 @@
+# Standalone service. See docs/compose-services.vi.md for startup order.
+name: ${COMPOSE_PROJECT_NAME:-ai_research_service}
+services:
+  migrate:
+    extends:
+      file: docker-compose.common.yml
+      service: app
+    build:
+      context: .
+      dockerfile: docker/migrate/Dockerfile
+    restart: 'no'
+volumes:
+  app-data: null
