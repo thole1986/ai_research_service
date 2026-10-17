@@ -38,6 +38,15 @@ class Settings(BaseSettings):
     event_retention_days: int = Field(30, ge=1)
     admin_token: SecretStr = SecretStr("")
     log_level: str = "INFO"
+    langfuse_tracing_enabled: bool = True
+    langfuse_public_key: SecretStr = SecretStr("")
+    langfuse_secret_key: SecretStr = SecretStr("")
+    langfuse_base_url: str = ""
+    langfuse_host: str = ""  # Compatibility with older Langfuse environment files.
+    langfuse_tracing_environment: str = ""
+    langfuse_capture_content: bool = False
+    langfuse_timeout_seconds: int = Field(2, ge=1, le=10)
+    otel_sdk_disabled: bool = False
     failure_point: str = ""
     failure_step: str = "RESEARCH"
 

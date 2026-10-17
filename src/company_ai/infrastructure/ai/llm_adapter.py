@@ -6,25 +6,27 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from company_ai.application.prompts import messages
+from company_ai.application.prompts import messages, provider_schema
 from company_ai.domain.contracts import AIResult, InvalidOutput, SafeFailure
 from company_ai.domain.outputs import SCHEMAS
 from company_ai.infrastructure.ai.crew_factory import make_crew
+from company_ai.observability import NoOpObserver
 
 
 def configure_crewai():
     os.environ["CREWAI_TELEMETRY_DISABLED"] = "true"
-    os.environ["OTEL_SDK_DISABLED"] = "true"
     # CrewAI interprets a relative value as an app-data name on Windows.
     os.environ["CREWAI_STORAGE_DIR"] = str(
         Path(os.environ.get("CREWAI_STORAGE_DIR", "./data/crewai")).resolve()
     )
 
 
-def bounded_llm(settings, step, payload, client):
+def bounded_llm(settings, step, payload, client, observer=None):
     configure_crewai()
     from crewai import BaseLLM
     from openai import APIStatusError
+
+    observer = observer or NoOpObserver()
 
     class BoundedOpenAI(BaseLLM):
         """Exactly one SDK request per Crew, with transport retries explicitly disabled.
@@ -46,38 +48,93 @@ def bounded_llm(settings, step, payload, client):
         ):
             async with self.lock:
                 if self.calls:
-                    raise InvalidOutput("ADDITIONAL_PROVIDER_CALL_BLOCKED")
+                    if self.failure is None:
+                        self.failure = InvalidOutput("ADDITIONAL_PROVIDER_CALL_BLOCKED")
+                    raise self.failure
                 self.calls += 1
             try:
-                response = await client.chat.completions.create(
+                with observer.span(
+                    "openai.chat.completions",
+                    generation=True,
                     model=settings.openai_model,
-                    messages=provider_messages,
-                    temperature=settings.llm_temperature,
-                    max_tokens=settings.max_output_tokens_per_step,
-                    response_format={
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": SCHEMAS[step].__name__,
-                            "strict": True,
-                            "schema": SCHEMAS[step].model_json_schema(),
-                        },
+                    model_parameters={
+                        "temperature": settings.llm_temperature,
+                        "max_tokens": settings.max_output_tokens_per_step,
+                        "response_format": "json_schema",
                     },
-                )
-                choice = response.choices[0]
-                if choice.finish_reason != "stop" or choice.message.refusal:
-                    raise InvalidOutput("INCOMPLETE_OR_REFUSED_OUTPUT")
-                output = SCHEMAS[step].model_validate_json(choice.message.content or "")
-                usage = response.usage
-                self.result = AIResult(
-                    output.model_dump(),
-                    usage.prompt_tokens if usage else None,
-                    usage.completion_tokens if usage else None,
-                    getattr(response, "_request_id", None),
-                )
-                return "Final Answer: " + output.model_dump_json()
+                    metadata={"step_name": step},
+                    input=provider_messages,
+                ) as generation:
+                    response = await client.chat.completions.create(
+                        model=settings.openai_model,
+                        messages=provider_messages,
+                        temperature=settings.llm_temperature,
+                        max_tokens=settings.max_output_tokens_per_step,
+                        response_format={
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": SCHEMAS[step].__name__,
+                                "strict": True,
+                                "schema": provider_schema(step, payload),
+                            },
+                        },
+                    )
+                    usage = getattr(response, "usage", None)
+                    usage_details = {}
+                    cost_details = {}
+                    if usage is not None:
+                        usage_details = {
+                            "input": usage.prompt_tokens,
+                            "output": usage.completion_tokens,
+                        }
+                        cost_details = {
+                            "input": usage.prompt_tokens * settings.input_usd_per_million / 1e6,
+                            "output": usage.completion_tokens
+                            * settings.output_usd_per_million
+                            / 1e6,
+                        }
+                    choice = response.choices[0]
+                    generation.update(
+                        output=choice.message.content,
+                        usage_details=usage_details,
+                        cost_details=cost_details,
+                        metadata={
+                            "provider_request_id": getattr(response, "_request_id", None),
+                            "finish_reason": choice.finish_reason,
+                            "cost_is_estimate": True,
+                        },
+                    )
+                    if choice.message.refusal:
+                        raise InvalidOutput("PROVIDER_REFUSED_OUTPUT")
+                    if choice.finish_reason == "length":
+                        raise InvalidOutput("OUTPUT_TOKEN_LIMIT_REACHED")
+                    if choice.finish_reason == "content_filter":
+                        raise InvalidOutput("PROVIDER_CONTENT_FILTERED")
+                    if choice.finish_reason != "stop":
+                        raise InvalidOutput("INCOMPLETE_OR_REFUSED_OUTPUT")
+                    output = SCHEMAS[step].model_validate_json(choice.message.content or "")
+                    self.result = AIResult(
+                        output.model_dump(),
+                        usage.prompt_tokens if usage else None,
+                        usage.completion_tokens if usage else None,
+                        getattr(response, "_request_id", None),
+                    )
+                    return "Final Answer: " + output.model_dump_json()
             except APIStatusError as exc:
                 # Only explicit 429 rejection is automatically retryable. No SDK retry.
-                self.failure = SafeFailure("RATE_LIMITED") if exc.status_code == 429 else exc
+                categories = {
+                    400: "PROVIDER_REQUEST_INVALID",
+                    401: "PROVIDER_AUTHENTICATION_FAILED",
+                    403: "PROVIDER_PERMISSION_DENIED",
+                    404: "PROVIDER_MODEL_NOT_FOUND",
+                    422: "PROVIDER_REQUEST_INVALID",
+                }
+                if exc.status_code == 429:
+                    self.failure = SafeFailure("RATE_LIMITED")
+                elif exc.status_code in categories:
+                    self.failure = InvalidOutput(categories[exc.status_code])
+                else:
+                    self.failure = exc
                 raise self.failure from None
             except ValidationError:
                 self.failure = InvalidOutput("INVALID_STRUCTURED_OUTPUT")
@@ -113,8 +170,9 @@ def bounded_llm(settings, step, payload, client):
 
 
 class CrewAIAdapter:
-    def __init__(self, settings, client=None):
+    def __init__(self, settings, client=None, observer=None):
         self.settings, self.client = settings, client
+        self.observer = observer or NoOpObserver()
 
     async def execute(self, step, payload):
         from openai import AsyncOpenAI
@@ -126,7 +184,7 @@ class CrewAIAdapter:
             timeout=self.settings.llm_request_timeout_seconds,
             max_retries=0,
         )
-        llm = bounded_llm(self.settings, step, payload, client)
+        llm = bounded_llm(self.settings, step, payload, client, self.observer)
         # CrewAI can print raw responses on error even with verbose=False. Worker is solo;
         # suppress these streams, and emit our own sanitized structured events in the runner.
         try:

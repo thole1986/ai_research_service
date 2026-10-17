@@ -8,7 +8,9 @@ INSTRUCTIONS = {
     "Evidence strings MUST be exact substrings of company_description or website_text. "
     "State missing information as limitations. Do not use the ICP as company evidence.",
     "CLASSIFY": "Assess fit against the ICP using ONLY research evidence. "
-    "matching_signals MUST quote exact substrings of research.evidence. "
+    "Each matching_signals item MUST copy one complete string from research.evidence exactly, "
+    "without labels, paraphrasing, extra quotes or punctuation. "
+    "If no evidence supports a match, return matching_signals=[] and icp_match=false. "
     "Use missing_signals for unknown or unsupported criteria. Explain the fit cautiously.",
     "REPORT": "Write a concise sales report from the supplied checkpoints. Preserve limitations "
     "and missing signals. State that the score is a rule-based estimate and that sources "
@@ -29,10 +31,22 @@ def messages(step, payload):
     ]
 
 
+def provider_schema(step, payload):
+    schema = SCHEMAS[step].model_json_schema()
+    if step == "CLASSIFY":
+        signals = schema["properties"]["matching_signals"]
+        evidence = payload["research"]["evidence"]
+        if evidence:
+            signals["items"]["enum"] = list(dict.fromkeys(evidence))
+        else:
+            signals["maxItems"] = 0
+    return schema
+
+
 def reserve_cost(step, payload, settings):
     # UTF-8 bytes upper-bound ordinary tokenizer token counts; add schema/framing allowance.
     size = len(canonical(messages(step, payload)).encode())
-    size += len(canonical(SCHEMAS[step].model_json_schema()).encode()) + 1024
+    size += len(canonical(provider_schema(step, payload)).encode()) + 1024
     return (
         size * settings.input_usd_per_million
         + settings.max_output_tokens_per_step * settings.output_usd_per_million

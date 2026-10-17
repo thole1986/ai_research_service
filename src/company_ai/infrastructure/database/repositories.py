@@ -1,8 +1,6 @@
 from datetime import timedelta
-
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
-
 from company_ai.domain.contracts import STEPS, Claim
 from company_ai.domain.entities import JobEvent, ResearchJob, ResearchStep
 from company_ai.domain.errors import Conflict

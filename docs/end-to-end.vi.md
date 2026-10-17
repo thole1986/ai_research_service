@@ -715,12 +715,13 @@ Attempt count, lịch sử attempt và chi phí cũ không được xóa. Lần 
 
 | Tình huống | Trạng thái theo implementation hiện tại |
 |---|---|
-| Thiếu OpenAI API key | `InvalidOutput` → step/job `NEEDS_REVIEW`, mã chung `OUTPUT_OR_CONFIGURATION_INVALID`; có thể đã giữ chỗ cost |
+| Thiếu OpenAI API key | `NEEDS_REVIEW`, mã `PROVIDER_NOT_CONFIGURED`; có thể đã giữ chỗ cost |
 | HTTP `429` | Nhánh safe retry có backoff, còn chịu trần attempt/call/budget |
 | Timeout, lỗi kết nối, HTTP `5xx` | Khi đi qua nhánh exception chung của bước AI: `UNKNOWN` và job `NEEDS_REVIEW` |
-| HTTP `401`/`403` hoặc status khác `429` | Adapter hiện chưa có phân loại cấu hình riêng; cũng đi theo nhánh bảo thủ `UNKNOWN`, cần kiểm tra quyền/key |
-| Provider refusal hoặc output bị cắt | `NEEDS_REVIEW`, không tự request thêm để sửa |
-| JSON/schema sai, field dư, kiểu sai hoặc dẫn chứng không hợp lệ | `NEEDS_REVIEW`, mã chung `OUTPUT_OR_CONFIGURATION_INVALID` |
+| HTTP `400`/`422`, `401`, `403`, `404` | `NEEDS_REVIEW`, lần lượt có mã `PROVIDER_REQUEST_INVALID`, `PROVIDER_AUTHENTICATION_FAILED`, `PROVIDER_PERMISSION_DENIED`, `PROVIDER_MODEL_NOT_FOUND` |
+| Provider refusal hoặc output bị cắt | `NEEDS_REVIEW`, mã `PROVIDER_REFUSED_OUTPUT` hoặc `OUTPUT_TOKEN_LIMIT_REACHED`; không tự request thêm để sửa |
+| JSON/schema sai, field dư hoặc kiểu sai | `NEEDS_REVIEW`, mã `INVALID_STRUCTURED_OUTPUT` |
+| Dẫn chứng không hợp lệ | `NEEDS_REVIEW`, mã `UNSUPPORTED_EVIDENCE`, `UNSUPPORTED_CLASSIFICATION_SIGNAL` hoặc `ICP_MATCH_WITHOUT_EVIDENCE` |
 | Crew lỗi không có provider failure đã lưu | Adapter có thể chuyển thành `InvalidOutput`, cần duyệt; không suy diễn mọi lỗi Crew đều đã gọi provider |
 | Đã có output nhưng thiếu usage | Nếu output hợp lệ vẫn checkpoint; giữ cost ước tính thay vì đối soát token |
 | Vượt call cap hoặc dollar estimate cap | Dừng trước call đó với `BUDGET_EXCEEDED`; không miễn giới hạn khi admin retry |

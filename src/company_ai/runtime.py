@@ -2,10 +2,18 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from functools import lru_cache
 
 from company_ai.infrastructure.database.repositories import Repository
 from company_ai.infrastructure.database.session import Database
+from company_ai.infrastructure.telemetry.langfuse import create_observer
 from company_ai.settings import get_settings
+
+
+@lru_cache
+def get_worker_observer():
+    # Created within the worker process, never at import time/before a fork.
+    return create_observer(get_settings())
 
 
 @asynccontextmanager

@@ -1,5 +1,6 @@
 import json
 import logging
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
 
@@ -21,3 +22,29 @@ def configure_logging(level="INFO"):
     logging.basicConfig(level=level, format="%(message)s")
     for name in ("httpx", "httpcore", "openai", "crewai", "LiteLLM"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
+
+
+class NoOpObservation:
+    def update(self, **fields):
+        pass
+
+
+class NoOpObserver:
+    """Null object used when optional tracing is unavailable or disabled."""
+
+    @contextmanager
+    def span(
+        self,
+        name,
+        *,
+        metadata=None,
+        input=None,
+        generation=False,
+        model=None,
+        model_parameters=None,
+        session_id=None,
+    ):
+        yield NoOpObservation()
+
+    def flush(self):
+        pass

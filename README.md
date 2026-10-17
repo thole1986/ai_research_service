@@ -76,7 +76,9 @@ Python 3.11–3.13; verified here with Python 3.13.13. Install `uv` first.
 
 ```powershell
 uv sync --extra dev --frozen
-Copy-Item .env.example .env
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+# Set OPENAI_API_KEY in .env; confirm Redis is reachable at REDIS_URL.
+# For Langfuse, install with --extra observability as well and configure its keys.
 .\.venv\Scripts\alembic upgrade head
 .\.venv\Scripts\uvicorn company_ai.main:app --host 127.0.0.1 --port 8000
 ```
@@ -109,6 +111,66 @@ Invoke-RestMethod "http://localhost:8000/api/v1/research/jobs/$($job.job_id)"
 Invoke-RestMethod "http://localhost:8000/api/v1/research/jobs/$($job.job_id)/events"
 ```
 
+### Demo payloads for the team
+
+After cloning, complete the local/Docker setup above and check `GET /ready`.
+The API, AI worker, maintenance worker, Beat, database and Redis must be running.
+Submitting these examples uses the configured OpenAI account and incurs normal API usage.
+
+| JSON file | Data | Demo scenario |
+|---|---|---|
+| [MISA AMIS CRM](examples/research/misa-amis-crm.json) | Real company, Vietnamese text | Assess a CRM provider against a business-software ICP |
+| [Lotus CRM Demo](examples/research/lotus-crm-fit.json) | Fictional company, English text | Explicit B2B/SaaS/SME evidence for the current scoring rules |
+| [Bánh Mì Demo](examples/research/banh-mi-retail-no-fit.json) | Fictional Vietnamese retailer | Consumer food retail compared with a CRM-provider ICP |
+| [Nova Demo](examples/research/nova-insufficient-evidence.json) | Fictional company with minimal evidence | Empty website text, null URL, limitations and missing signals |
+
+The MISA payload is an operator-written summary, checked on **2026-10-17**, of
+[MISA's AMIS CRM introduction](https://helpcrm.misa.vn/kb/gioi-thieu-amis-crm/) and
+[product overview](https://helpcrm.misa.vn/kb/tinh-nang-noi-bat-cua-phan-mem-quan-ly-ban-hang-misa-amis-crm/).
+It is not a verbatim website extract or an exhaustive company profile. The other three
+companies are synthetic fixtures; their `example.com` URLs are placeholders.
+The pipeline only analyzes supplied text and does not fetch the `website` URL.
+
+**Postman:** use `POST http://localhost:8000/api/v1/research/jobs`, set
+`Content-Type: application/json` and `Idempotency-Key: demo-misa-001`, then paste a
+file's contents into **Body → raw → JSON**. Change the key for each new execution.
+Use the returned `job_id` with the GET endpoints shown below.
+
+**PowerShell:** run from the repository root; change `$sample` to try another file.
+UTF-8 bytes preserve Vietnamese accents in Windows PowerShell 5.1 as well as PowerShell 7.
+
+```powershell
+$baseUrl = 'http://localhost:8000'
+Invoke-RestMethod "$baseUrl/ready"
+$sample = '.\examples\research\misa-amis-crm.json'
+$body = Get-Content -LiteralPath $sample -Raw -Encoding UTF8
+$headers = @{ 'Idempotency-Key' = "demo-$([guid]::NewGuid())" }
+$job = Invoke-RestMethod "$baseUrl/api/v1/research/jobs" -Method Post `
+  -Headers $headers -ContentType 'application/json; charset=utf-8' `
+  -Body ([System.Text.Encoding]::UTF8.GetBytes($body))
+
+# Poll for up to roughly six minutes; no automatic job retry.
+for ($poll = 0; $poll -lt 180; $poll++) {
+  $state = Invoke-RestMethod "$baseUrl/api/v1/research/jobs/$($job.job_id)" -TimeoutSec 15
+  if ($state.status -in @('COMPLETED', 'NEEDS_REVIEW', 'FAILED')) { break }
+  Start-Sleep -Seconds 2
+}
+$state | ConvertTo-Json -Depth 20
+Invoke-RestMethod "$baseUrl/api/v1/research/jobs/$($job.job_id)/events"
+```
+
+A valid payload can still stop at `NEEDS_REVIEW` if the provider response fails validation;
+inspect `error.code` and `/events`. Missing business information should appear in
+`limitations`/`missing_signals`; it does not make the input invalid. Do not assert exact
+scores for real-company demos: the current deterministic rules detect English
+B2B/SaaS/SME keywords, so Vietnamese evidence can fit the ICP yet receive a lower score.
+Use the Lotus fixture to demonstrate those specific rules; inspect `rule_breakdown`.
+
+For Langfuse input/output, install the optional extra, set `LANGFUSE_CAPTURE_CONTENT=true`
+and `OTEL_SDK_DISABLED=false`, then restart the worker. Find the new job by its session/job ID
+and inspect root/step Observations. Reusing a key returns the original job rather than
+running another demo.
+
 New requests return 202. The same canonical payload/key returns 200 and the original job;
 changed payload with the same key returns 409. Invalid input returns 422, body size overflow
 413, unknown jobs 404. Poll results contain ordered step outputs, attempts, UTC timestamps,
@@ -127,6 +189,31 @@ services. Configuration/prompt mismatch requires a new job and idempotency key.
 attempted LLM calls, tokens and cost estimates.
 
 ## Correctness and cost policy
+
+Optional Langfuse tracing uses an application port and an infrastructure adapter.
+Install with `pip install -e ".[observability]"` or `uv sync --extra observability`.
+Set `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, and `LANGFUSE_BASE_URL` in `.env`;
+set `OTEL_SDK_DISABLED=false` and restart the AI worker. Tracing automatically activates
+when both keys and the SDK are present. `LANGFUSE_TRACING_ENABLED=false` disables it.
+Missing configuration/package or telemetry failures do not change workflow outcomes.
+
+Each execution creates a `company-research` trace with `job_id`, step/attempt metadata,
+checkpoint hits, nested OpenAI generations, token usage, estimated costs, and sanitized
+error categories. Raw company text, prompts, and outputs are excluded by default;
+set `LANGFUSE_CAPTURE_CONTENT=true` to include them. The worker uses a private tracer
+provider and drains spans off the event loop with a bounded timeout after each job.
+CrewAI telemetry remains disabled. Tests use the real Langfuse SDK with an in-memory
+exporter, without contacting Langfuse or OpenAI. See the
+[Vietnamese setup guide](docs/README.vi.md#langfuse-tùy-chọn) for details.
+
+With content capture enabled, the root observation contains the submitted company JSON
+and the execution outcome (`status`, validated `result`, sanitized `error`). Each step
+contains its own payload/output, including the rule-based SCORE step and reused checkpoints.
+Rejected structured outputs remain visible on the failed step without becoming checkpoints.
+Job/session and attempt metadata propagate to nested generations. In current Langfuse,
+inspect root/step **Observations** for input/output; legacy trace columns may stay empty.
+Restart the worker after changing configuration and create a new job to see the new fields;
+old traces cannot recover content that was never captured.
 
 - A step claim and its attempt are one database transaction. Completion requires current
   lease token, input hash, RUNNING status and an unexpired lease; completed output is immutable.

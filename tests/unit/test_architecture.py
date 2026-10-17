@@ -13,6 +13,8 @@ def test_dependencies_point_toward_domain():
             "fastapi",
             "crewai",
             "redis",
+            "langfuse",
+            "opentelemetry",
         ),
         "application": (
             "company_ai.infrastructure",
@@ -21,8 +23,17 @@ def test_dependencies_point_toward_domain():
             "crewai",
             "fastapi",
             "redis",
+            "langfuse",
+            "opentelemetry",
         ),
-        "api": ("company_ai.infrastructure", "sqlalchemy", "crewai", "redis"),
+        "api": (
+            "company_ai.infrastructure",
+            "sqlalchemy",
+            "crewai",
+            "redis",
+            "langfuse",
+            "opentelemetry",
+        ),
     }
     for layer, forbidden in banned.items():
         for path in (package / layer).rglob("*.py"):

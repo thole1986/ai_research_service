@@ -10,7 +10,7 @@ services:
       REDIS_URL: ${CONTAINER_REDIS_URL:-redis://host.docker.internal:6379/0}
       CREWAI_STORAGE_DIR: /app/data/crewai
       CREWAI_TELEMETRY_DISABLED: 'true'
-      OTEL_SDK_DISABLED: 'true'
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
     volumes:
     - app-data:/app/data
     extra_hosts:

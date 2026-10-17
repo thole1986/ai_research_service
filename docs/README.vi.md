@@ -74,8 +74,8 @@ Sử dụng Python 3.11–3.13 và cài `uv` trước. Dự án đã được ki
 
 ```powershell
 uv sync --extra dev --frozen
-# Bỏ qua lệnh sao chép nếu đã có .env.
-Copy-Item .env.example .env
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+# Điền OPENAI_API_KEY trong .env và kiểm tra Redis tại REDIS_URL trước khi chạy.
 .\.venv\Scripts\alembic upgrade head
 .\.venv\Scripts\uvicorn company_ai.main:app --host 127.0.0.1 --port 8000
 ```
@@ -119,6 +119,32 @@ File `uv.lock` khóa phiên bản các dependency trực tiếp và gián tiếp
 Không đưa `.env`, API key hoặc database vào mã nguồn hay chia sẻ chúng trong chat.
 
 ## 5. Ví dụ gọi API
+
+### Bộ JSON demo có sẵn sau khi clone
+
+[README chính có bảng ví dụ và lệnh Postman/PowerShell chạy đầy đủ](../README.md#demo-payloads-for-the-team).
+Các file nằm tại `examples/research/`:
+
+- [MISA AMIS CRM](../examples/research/misa-amis-crm.json): công ty thật, nội dung tiếng Việt
+  tóm tắt từ tài liệu chính thức của MISA; nguồn và ngày kiểm tra được ghi trong README chính.
+- [Lotus CRM Demo](../examples/research/lotus-crm-fit.json): dữ liệu giả lập có rõ B2B/SaaS/SME.
+- [Bánh Mì Demo](../examples/research/banh-mi-retail-no-fit.json): dữ liệu giả lập bán lẻ đồ ăn,
+  không cùng lĩnh vực với ICP cung cấp phần mềm CRM.
+- [Nova Demo](../examples/research/nova-insufficient-evidence.json): dữ liệu giả lập thiếu
+  thông tin, `website: null`, `website_text` rỗng.
+
+Trong Postman, chọn `POST /api/v1/research/jobs`, **Body → raw → JSON**, dán nguyên
+nội dung file và đặt header `Content-Type: application/json`, `Idempotency-Key: demo-misa-001`.
+Mỗi lượt demo mới đổi key; dùng lại key sẽ trả về job cũ. Khi dùng PowerShell với tiếng Việt,
+đọc file bằng `-Encoding UTF8` và gửi bằng `System.Text.Encoding.UTF8.GetBytes` như ví dụ
+README chính. Cần API, Redis, database đã migrate và các worker/Beat hoạt động.
+
+Pipeline không truy cập URL; `website_text` trong ví dụ MISA là bản tóm tắt do người
+vận hành cung cấp, không phải trích nguyên văn. Scoring hiện nhận keyword tiếng Anh
+B2B/SaaS/SME nên không nên dùng điểm số của ví dụ tiếng Việt làm khẳng định về công ty
+thật. Mở `rule_breakdown`, `limitations`, `missing_signals` để giải thích kết quả;
+dùng Lotus để demo riêng các quy tắc keyword. Các request demo gọi OpenAI thật khi
+worker đã được cấu hình key.
 
 ### Tạo job và xem kết quả
 
@@ -272,6 +298,87 @@ Sau đó tạo lại các service ứng dụng để nhận cấu hình mới. N
 
 ## 10. Vận hành và xử lý sự cố
 
+### Langfuse tùy chọn
+
+Langfuse được tích hợp theo port `WorkflowObserver` ở application, adapter tại
+`infrastructure/telemetry/langfuse.py`, và `NoOpObserver` khi không bật. Composition
+root trong `runtime.py` khởi tạo observer trong process worker và inject cùng observer
+vào workflow/CrewAI adapter. Application/domain không import Langfuse hay OpenTelemetry.
+
+Nếu đã cài Langfuse trong đúng virtualenv đang chạy worker thì không cần cài lại.
+Để cài qua cấu hình dự án:
+
+```powershell
+pip install -e ".[observability]"
+# Hoặc, nếu dùng uv và cần cả dependencies cho test:
+uv sync --extra dev --extra observability
+```
+
+Thêm các biến sau vào `.env`, dùng key và URL project của bạn:
+
+```dotenv
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+LANGFUSE_TRACING_ENABLED=true
+LANGFUSE_TRACING_ENVIRONMENT=development
+LANGFUSE_CAPTURE_CONTENT=false
+LANGFUSE_TIMEOUT_SECONDS=2
+OTEL_SDK_DISABLED=false
+```
+
+Restart worker sau khi sửa `.env`. `LANGFUSE_BASE_URL` cần trỏ đúng region hoặc host
+self-hosted. `LANGFUSE_HOST` cũ vẫn được hỗ trợ nếu không đặt `LANGFUSE_BASE_URL`.
+Langfuse SDK 5 yêu cầu server Langfuse 4; server self-hosted 3 dùng SDK 4
+(`pip install "langfuse>=4,<5"`). Xem
+[tài liệu tương thích SDK](https://langfuse.com/docs/observability/sdk/overview).
+Extra `observability` không nằm trong dependencies mặc định hay image Docker mặc định;
+nếu dùng Docker cần cài extra này trong image worker.
+
+Có đủ hai key và package thì tracing tự bật. Thiếu key, chưa cài package, tắt
+`LANGFUSE_TRACING_ENABLED`, hoặc `OTEL_SDK_DISABLED=true` thì dùng no-op. Biến
+`OTEL_SDK_DISABLED` là công tắc tắt toàn bộ tracing, nên phải để `false` khi dùng
+Langfuse; telemetry riêng của CrewAI vẫn tắt qua `CREWAI_TELEMETRY_DISABLED=true`.
+
+Mỗi lượt thực thi tạo trace `company-research`, tra cứu qua metadata `job_id`.
+Bên dưới là span của từng step và generation `openai.chat.completions`, với
+`attempt_id`, model, thời gian, token, chi phí ước tính và mã lỗi đã lọc.
+Checkpoint được dùng lại có trạng thái `CHECKPOINT_HIT`, không gọi lại LLM.
+Retry/resume tạo trace thực thi mới, liên kết bằng cùng `job_id`.
+Mặc định không gửi company text, prompt hoặc output; muốn xem chúng trong Langfuse,
+đặt `LANGFUSE_CAPTURE_CONTENT=true`. Mã lỗi không chứa raw exception/provider response.
+
+Khi bật ghi nội dung, root `company-research` có input là JSON request và output gồm
+`job_id`, `status`, `result` và `error`. Khi lỗi, `result` chỉ chứa checkpoint đã hợp lệ.
+Mỗi step có payload riêng và output riêng; `SCORE` có input research/classification
+và output điểm cùng breakdown. Step dùng lại checkpoint cũng có đủ input/output.
+Output bị validator từ chối được giữ trên step lỗi để debug, không được lưu thành
+checkpoint. Model parameters, prompt/schema/rules version, input hash, job/session
+và attempt metadata giúp đối chiếu từng lần chạy và được truyền xuống generation.
+
+Nếu không thấy các cột input/output, trước hết kiểm tra `LANGFUSE_CAPTURE_CONTENT`
+trong môi trường của worker và restart worker. Với SDK 5/Langfuse 4, nội dung tổng
+nằm ở root observation; xem **Observations** hoặc bấm root/step trong cây trace.
+Cột trace input/output cũ có thể vẫn trống dù observation đã có đủ dữ liệu. Xem
+[hướng dẫn chính thức về input/output trống](https://langfuse.com/faq/all/empty-trace-input-and-output).
+Một trace có một root `company-research`; giao diện có thể hiển thị tên trace và
+tên root giống nhau. Không phải hai lần chạy nếu chỉ có một root span.
+Tạo job mới với `Idempotency-Key` mới để kiểm tra; dữ liệu chưa ghi của trace cũ
+không được khôi phục tự động sau khi bật cấu hình.
+
+Langfuse dùng tracer provider riêng, không monkey-patch OpenAI hay tự bật CrewAI tracing.
+Lỗi khởi tạo/start/update/end/flush telemetry không làm job thất bại hoặc gọi lại LLM.
+Cuối mỗi task, worker flush span ngoài event loop với thời hạn cấu hình, còn client
+được tái sử dụng trong process và SDK xử lý shutdown lúc process thoát bình thường.
+Process bị kill đột ngột có thể mất trace chưa export; checkpoint/audit DB vẫn là
+nguồn quyết định trạng thái job.
+
+Log `TELEMETRY_ENABLED` chỉ xác nhận khởi tạo client, không xác nhận server đã nhận
+trace. `TELEMETRY_DISABLED`/`TELEMETRY_UNAVAILABLE` ghi nguyên nhân cố định khi adapter
+không hoạt động. Kiểm tra URL, key, công tắc OpenTelemetry và log exporter nếu UI
+chưa có trace. Các test tự động dùng SDK thật với exporter trong bộ nhớ, không gửi
+dữ liệu sang Langfuse/OpenAI.
+
 ```powershell
 docker compose ps
 docker compose logs --tail=100 api ai-worker maintenance-worker beat
@@ -287,6 +394,24 @@ docker compose down
 | Job thành `NEEDS_REVIEW` | Xem events, key, ngân sách và checkpoint; cân nhắc retry có xác nhận hoặc tạo job mới |
 | SQLite báo `database is locked` | Có worker chạy trùng hoặc DB nằm trên ổ mạng không |
 | Sửa `.env` nhưng hành vi chưa đổi | Tạo lại container hoặc khởi động lại các tiến trình chạy trực tiếp |
+
+Khi chạy local, JSON mẫu Acme với `website_text` rỗng vẫn hợp lệ: pipeline dùng
+`company_description` làm evidence và không tự tải nội dung URL `website`.
+`CLASSIFY` chọn nguyên văn các chuỗi evidence qua JSON Schema; validator phía server
+vẫn từ chối dẫn chứng bịa hoặc diễn đạt lại.
+
+Nếu job dừng, xem `error.code` ở `GET /api/v1/research/jobs/{job_id}` và
+`details.error_category` ở endpoint `/events`. `OUTPUT_TOKEN_LIMIT_REACHED` nghĩa là
+output bị cắt: cân nhắc tăng `MAX_OUTPUT_TOKENS_PER_STEP`, rồi restart worker/API.
+`UNSUPPORTED_CLASSIFICATION_SIGNAL` nghĩa là signal không trích đúng evidence;
+khác với lỗi thiếu key (`PROVIDER_NOT_CONFIGURED`). Mã lỗi là danh sách cố định,
+không lưu raw response hoặc exception có thể chứa dữ liệu nhạy cảm.
+
+Với các job cũ chỉ lưu `OUTPUT_OR_CONFIGURATION_INVALID`, không thể khôi phục
+nguyên nhân cụ thể từ event đó. Sau khi cập nhật code/prompt, restart các tiến trình
+local và tạo job mới với `Idempotency-Key` mới để kiểm tra. Không retry job có
+checkpoint khác phiên bản cấu hình/prompt; thay đổi prompt `CLASSIFY` vẫn giữ nguyên
+hash checkpoint `RESEARCH` nếu cấu hình khác không đổi.
 
 SQLite WAL chỉ có một writer tại một thời điểm; hệ thống dùng transaction ngắn, busy timeout 5 giây và retry DB có giới hạn. Khi sao lưu, dùng SQLite backup API hoặc dừng service trước khi sao chép. Chỉ sao chép file `.db` khi WAL còn hoạt động có thể mất dữ liệu.
 

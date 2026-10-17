@@ -105,7 +105,19 @@ async def test_beat_schedule_and_task_redelivery(repo, payload, monkeypatch):
     assert celery_app.conf.task_acks_late
     assert celery_app.backend.__class__.__name__ == "DisabledBackend"
     adapter = CountingAdapter()
-    monkeypatch.setattr(ai_tasks, "CrewAIAdapter", lambda _: adapter)
+    from unittest.mock import Mock
+
+    from company_ai.observability import NoOpObserver
+
+    observer = NoOpObserver()
+    observer.flush = Mock()
+
+    def adapter_factory(settings, **kwargs):
+        assert kwargs["observer"] is observer
+        return adapter
+
+    monkeypatch.setattr(ai_tasks, "CrewAIAdapter", adapter_factory)
+    monkeypatch.setattr(ai_tasks, "get_worker_observer", lambda: observer)
 
     from sqlalchemy import event
 
@@ -132,3 +144,4 @@ async def test_beat_schedule_and_task_redelivery(repo, payload, monkeypatch):
     assert adapter.calls == ["RESEARCH", "CLASSIFY", "REPORT"]
     assert (await repo.get_job(job.id))[0].status == "COMPLETED"
     assert len(disposed) == 3
+    assert observer.flush.call_count == 2

@@ -1,6 +1,7 @@
 """Application ports. No SQLAlchemy, Redis, FastAPI or CrewAI imports belong here."""
 
-from typing import Protocol
+from contextlib import AbstractContextManager
+from typing import Any, Protocol
 
 from company_ai.domain.contracts import AIResult, Claim
 from company_ai.domain.entities import JobEvent, ResearchJob, ResearchStep
@@ -30,3 +31,21 @@ class ResearchRepository(Protocol):
 
 class JobPublisher(Protocol):
     async def __call__(self, job_id: str) -> None: ...
+
+
+class Observation(Protocol):
+    def update(self, **fields: Any) -> None: ...
+
+
+class WorkflowObserver(Protocol):
+    def span(
+        self,
+        name: str,
+        *,
+        metadata: dict | None = None,
+        input: Any = None,
+        generation: bool = False,
+        model: str | None = None,
+        model_parameters: dict | None = None,
+        session_id: str | None = None,
+    ) -> AbstractContextManager[Observation]: ...
