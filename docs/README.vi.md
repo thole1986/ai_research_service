@@ -1,5 +1,7 @@
 # Dịch vụ nghiên cứu doanh nghiệp và đánh giá khách hàng tiềm năng bằng AI
 
+Xem [Bản đồ hệ thống: sơ đồ, thành phần và luồng DDD](system-map.vi.md) để nắm tổng quan trước khi đọc code.
+
 Giải thích chi tiết từ API đến báo cáo, các service tích hợp và cách xử lý lỗi: [Luồng end to end](end-to-end.vi.md).
 
 Muốn chạy riêng từng service: [Các file Compose và lệnh chạy tương ứng](compose-services.vi.md). File tổng hợp vẫn dùng được như trước.
