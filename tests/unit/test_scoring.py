@@ -1,4 +1,4 @@
-from company_ai.domain.scoring import score
+from company_ai.domain.research.scoring import score
 
 
 async def test_scoring_missing_signals():

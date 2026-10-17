@@ -4,8 +4,8 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import update
 
-from company_ai.infrastructure.database.models import Step, now
-from company_ai.infrastructure.database.repositories import Conflict
+from company_ai.infrastructure.research.persistence.models import Step, now
+from company_ai.infrastructure.research.persistence.repositories import Conflict
 
 
 async def test_idempotency(repo, payload):

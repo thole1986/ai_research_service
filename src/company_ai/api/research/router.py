@@ -1,41 +1,25 @@
-import secrets
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 
-from company_ai.api.schemas import EventView, JobAccepted, JobInput, JobView, RetryInput
-from company_ai.application.jobs import JobService
-from company_ai.domain.errors import Conflict
+from company_ai.api.dependencies import AppSettings, require_admin
+from company_ai.api.research.dependencies import Jobs
+from company_ai.api.research.schemas import EventView, JobAccepted, JobInput, JobView, RetryInput
+from company_ai.domain.research.errors import Conflict
 
-router = APIRouter()
-
-
-async def job_service(request: Request):
-    return request.app.state.jobs
+router = APIRouter(prefix="/api/v1/research/jobs", tags=["research"])
 
 
-Jobs = Annotated[JobService, Depends(job_service)]
-
-
-async def admin(request: Request, authorization: Annotated[str | None, Header()] = None):
-    token = request.app.state.settings.admin_token.get_secret_value()
-    if not token or not secrets.compare_digest(authorization or "", f"Bearer {token}"):
-        raise HTTPException(401, "ADMIN_AUTH_REQUIRED")
-
-
-@router.post("/api/v1/research/jobs", status_code=202, response_model=JobAccepted)
+@router.post("", status_code=202, response_model=JobAccepted)
 async def create_job(
     body: JobInput,
-    request: Request,
+    settings: AppSettings,
     response: Response,
     idempotency_key: Annotated[str, Header(min_length=1, max_length=200)],
     service: Jobs,
 ):
     payload = body.model_dump(mode="json")
-    if (
-        sum(len(str(v or "")) for v in payload.values())
-        > request.app.state.settings.max_input_chars
-    ):
+    if sum(len(str(v or "")) for v in payload.values()) > settings.max_input_chars:
         raise HTTPException(422, "INPUT_TOO_LONG")
     try:
         job, created = await service.create(idempotency_key, payload)
@@ -46,7 +30,7 @@ async def create_job(
     return {"job_id": job.id, "status": job.status, "status_url": f"/api/v1/research/jobs/{job.id}"}
 
 
-@router.get("/api/v1/research/jobs/{job_id}", response_model=JobView)
+@router.get("/{job_id}", response_model=JobView)
 async def get_job(job_id: str, service: Jobs):
     job, steps = await service.get(job_id)
     return {
@@ -73,7 +57,7 @@ async def get_job(job_id: str, service: Jobs):
     }
 
 
-@router.get("/api/v1/research/jobs/{job_id}/events", response_model=list[EventView])
+@router.get("/{job_id}/events", response_model=list[EventView])
 async def events(
     job_id: str,
     service: Jobs,
@@ -92,30 +76,10 @@ async def events(
     ]
 
 
-@router.post("/api/v1/research/jobs/{job_id}/retry", status_code=202, dependencies=[Depends(admin)])
-async def retry(job_id: str, body: RetryInput, request: Request, service: Jobs):
+@router.post("/{job_id}/retry", status_code=202, dependencies=[Depends(require_admin)])
+async def retry(job_id: str, body: RetryInput, service: Jobs):
     try:
         await service.retry(job_id, body.step_name)
     except Conflict as exc:
         raise HTTPException(409, str(exc)) from None
     return {"job_id": job_id, "status": "PENDING"}
-
-
-@router.get("/api/v1/admin/metrics", dependencies=[Depends(admin)])
-async def metrics(service: Jobs):
-    return await service.metrics()
-
-
-@router.get("/health")
-async def health():
-    return {"status": "ok"}
-
-
-@router.get("/ready")
-async def ready(request: Request, service: Jobs):
-    try:
-        await request.app.state.database_ready()
-        await request.app.state.broker_ping()
-    except Exception:
-        raise HTTPException(503, "DEPENDENCY_UNAVAILABLE") from None
-    return {"status": "ready"}

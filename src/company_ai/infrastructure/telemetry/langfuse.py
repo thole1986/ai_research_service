@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 
-from company_ai.domain.contracts import InvalidOutput, SafeFailure, output_error_category
+from company_ai.domain.research.contracts import InvalidOutput, SafeFailure, output_error_category
 from company_ai.observability import NoOpObservation, NoOpObserver, log_event
 
 

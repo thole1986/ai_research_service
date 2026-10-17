@@ -2,8 +2,8 @@ import time
 
 from pydantic import ValidationError
 
-from company_ai.application.ports import ResearchRepository, WorkflowObserver
-from company_ai.application.prompts import (
+from company_ai.application.research.ports import ResearchRepository, WorkflowObserver
+from company_ai.application.research.prompts import (
     INSTRUCTIONS,
     PROMPT_VERSION,
     SCHEMA_VERSION,
@@ -11,18 +11,18 @@ from company_ai.application.prompts import (
     provider_schema,
     reserve_cost,
 )
-from company_ai.application.step_executor import inject_failure, keep_lease
-from company_ai.domain.contracts import (
+from company_ai.application.research.step_executor import inject_failure, keep_lease
+from company_ai.domain.research.contracts import (
     AIResult,
     InvalidOutput,
     LLMAdapter,
     SafeFailure,
     output_error_category,
 )
-from company_ai.domain.hashing import digest
-from company_ai.domain.outputs import SCHEMAS
-from company_ai.domain.policies import validate_evidence
-from company_ai.domain.scoring import score
+from company_ai.domain.research.hashing import digest
+from company_ai.domain.research.outputs import SCHEMAS
+from company_ai.domain.research.policies import validate_evidence
+from company_ai.domain.research.scoring import score
 from company_ai.observability import NoOpObserver, log_event
 
 

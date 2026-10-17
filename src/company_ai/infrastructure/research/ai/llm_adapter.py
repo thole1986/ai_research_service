@@ -6,10 +6,10 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from company_ai.application.prompts import messages, provider_schema
-from company_ai.domain.contracts import AIResult, InvalidOutput, SafeFailure
-from company_ai.domain.outputs import SCHEMAS
-from company_ai.infrastructure.ai.crew_factory import make_crew
+from company_ai.application.research.prompts import messages, provider_schema
+from company_ai.domain.research.contracts import AIResult, InvalidOutput, SafeFailure
+from company_ai.domain.research.outputs import SCHEMAS
+from company_ai.infrastructure.research.ai.crew_factory import make_crew
 from company_ai.observability import NoOpObserver
 
 

@@ -7,8 +7,8 @@ from unittest.mock import Mock
 import pytest
 from pydantic import SecretStr
 
-from company_ai.domain.contracts import InvalidOutput
-from company_ai.infrastructure.ai.llm_adapter import configure_crewai
+from company_ai.domain.research.contracts import InvalidOutput
+from company_ai.infrastructure.research.ai.llm_adapter import configure_crewai
 from company_ai.infrastructure.telemetry.langfuse import LangfuseObserver, create_observer
 from company_ai.observability import NoOpObserver
 

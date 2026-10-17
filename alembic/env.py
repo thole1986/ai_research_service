@@ -1,9 +1,9 @@
 import asyncio
 
 from alembic import context
-from company_ai.infrastructure.database import models  # noqa: F401
 from company_ai.infrastructure.database.base import Base
 from company_ai.infrastructure.database.session import Database
+from company_ai.infrastructure.research.persistence import models  # noqa: F401
 from company_ai.settings import get_settings
 
 target_metadata = Base.metadata

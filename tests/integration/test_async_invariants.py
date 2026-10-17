@@ -1,7 +1,7 @@
 import asyncio
 from dataclasses import is_dataclass
 
-from company_ai.application.execute_workflow import run_workflow
+from company_ai.application.research.execute_workflow import run_workflow
 from tests.fakes import CountingAdapter
 
 

@@ -5,9 +5,9 @@ import httpx
 import pytest
 from openai import APIStatusError, RateLimitError
 
-from company_ai.application.prompts import provider_schema
-from company_ai.domain.contracts import InvalidOutput, SafeFailure
-from company_ai.infrastructure.ai.llm_adapter import CrewAIAdapter
+from company_ai.application.research.prompts import provider_schema
+from company_ai.domain.research.contracts import InvalidOutput, SafeFailure
+from company_ai.infrastructure.research.ai.llm_adapter import CrewAIAdapter
 
 
 async def test_actual_crewai_with_mock_sdk(settings, payload):

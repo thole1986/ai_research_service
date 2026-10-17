@@ -1,13 +1,10 @@
-from company_ai.main import create_app
-
-
-async def test_api_contracts(repo, settings, payload, client_factory):
+async def test_api_contracts(repo, settings, payload, client_factory, app_factory):
     published = []
 
     async def record(job_id):
         published.append(job_id)
 
-    client = await client_factory(create_app(settings, repo, record, lambda: True))
+    client = await client_factory(app_factory(record))
     headers = {"Idempotency-Key": "api-test"}
     response = await client.post("/api/v1/research/jobs", json=payload, headers=headers)
     assert response.status_code == 202
@@ -48,12 +45,12 @@ async def test_api_contracts(repo, settings, payload, client_factory):
     ).status_code == 401
 
 
-async def test_enqueue_gap_and_limits(repo, settings, payload, client_factory):
+async def test_enqueue_gap_and_limits(repo, settings, payload, client_factory, app_factory):
 
     async def unavailable(_):
         raise ConnectionError("private error must not be returned")
 
-    client = await client_factory(create_app(settings, repo, unavailable, lambda: True))
+    client = await client_factory(app_factory(unavailable))
     response = await client.post(
         "/api/v1/research/jobs", json=payload, headers={"Idempotency-Key": "gap"}
     )

@@ -1,4 +1,4 @@
-from company_ai.application.ports import JobPublisher, ResearchRepository
+from company_ai.application.research.ports import JobPublisher, ResearchJobRepository
 from company_ai.observability import log_event
 
 
@@ -7,7 +7,7 @@ class JobNotFound(Exception):
 
 
 class JobService:
-    def __init__(self, repo: ResearchRepository, publish: JobPublisher):
+    def __init__(self, repo: ResearchJobRepository, publish: JobPublisher):
         self.repo, self.publish = repo, publish
 
     async def _enqueue(self, job_id):

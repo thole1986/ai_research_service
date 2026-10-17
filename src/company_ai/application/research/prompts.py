@@ -1,5 +1,5 @@
-from company_ai.domain.hashing import canonical
-from company_ai.domain.outputs import SCHEMAS
+from company_ai.domain.research.hashing import canonical
+from company_ai.domain.research.outputs import SCHEMAS
 
 PROMPT_VERSION = "evidence-v1"
 SCHEMA_VERSION = "1"

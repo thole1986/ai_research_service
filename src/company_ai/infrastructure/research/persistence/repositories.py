@@ -1,21 +1,39 @@
 from datetime import timedelta
+
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
-from company_ai.domain.contracts import STEPS, Claim
-from company_ai.domain.entities import JobEvent, ResearchJob, ResearchStep
-from company_ai.domain.errors import Conflict
-from company_ai.domain.hashing import digest
-from company_ai.domain.policies import budget_allows, expired_step_outcome, failure_job_status
-from company_ai.infrastructure.database.mapping import snapshot
-from company_ai.infrastructure.database.models import Attempt, Event, Job, Step, now, uid
+
+from company_ai.domain.research.contracts import STEPS, Claim
+from company_ai.domain.research.entities import JobEvent, ResearchJob, ResearchStep
+from company_ai.domain.research.errors import Conflict
+from company_ai.domain.research.hashing import digest
+from company_ai.domain.research.policies import (
+    budget_allows,
+    expired_step_outcome,
+    failure_job_status,
+)
+from company_ai.infrastructure.database.session import Database
+from company_ai.infrastructure.database.transactions import SessionOperations
+from company_ai.infrastructure.research.persistence.mapping import snapshot
+from company_ai.infrastructure.research.persistence.models import (
+    Attempt,
+    Event,
+    Job,
+    Step,
+    now,
+    uid,
+)
+from company_ai.settings import Settings
 
 
 def event(session, job_id, kind, step_id=None, **details):
     session.add(Event(job_id=job_id, step_id=step_id, event_type=kind, details_json=details))
 
 
-class Repository:
-    def __init__(self, db, settings):
+class SqlAlchemyResearchRepository:
+    """Research aggregate persistence; HTTP and workers inject their session scope."""
+
+    def __init__(self, db: Database | SessionOperations, settings: Settings):
         self.db, self.settings = (db, settings)
 
     async def _lock_job(self, s, job_id):

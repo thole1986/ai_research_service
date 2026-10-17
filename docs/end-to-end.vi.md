@@ -180,7 +180,7 @@ Trong một transaction, repository:
 
 Nếu hai request cùng key đến đồng thời, unique constraint quyết định bản ghi thắng. Transaction thua rollback, đọc job đã có rồi so request hash. Cơ chế không dựa vào một lần `SELECT` kiểm tra trước khi insert.
 
-Repository trả đối tượng domain `ResearchJob` thay vì ORM object. DB session đã đóng khi application tiếp tục publish.
+Repository trả đối tượng domain `ResearchJob` thay vì ORM object. Transaction đã kết thúc và connection đã trả về pool trước khi application tiếp tục publish; session của HTTP request đóng khi dependency kết thúc.
 
 ### 3.5. Response có nghĩa gì?
 
@@ -775,7 +775,7 @@ API → application use case → repository/publisher port
                 domain
 
 Infrastructure triển khai các port.
-main.py và runtime.py lắp ghép implementation cụ thể.
+bootstrap/ và runtime.py lắp ghép implementation cụ thể; main.py đăng ký router và dependency.
 ```
 
 | Tầng | Ví dụ trách nhiệm |
@@ -812,9 +812,9 @@ Lease được so với thời gian UTC do tiến trình ứng dụng tạo, kh�
 
 - API có engine thuộc lifecycle của ứng dụng; đóng Redis client và dispose engine khi shutdown.
 - Mỗi task Celery có engine thuộc event loop của lần thực thi, dispose trước khi đóng loop.
-- Một thao tác repository dùng một AsyncSession; các coroutine đồng thời không chia sẻ session.
+- API inject một `AsyncSession` cho mỗi request, kết thúc transaction theo thao tác research; worker mở session riêng theo thao tác. Các coroutine đồng thời không chia sẻ session.
 - `Database.write()` là biên transaction ngắn; provider call và publish không nằm trong đó.
-- `Database.get_session()` là async generator cho các use case CRUD cần DI session ngắn; pipeline hiện chủ động mở session theo từng thao tác.
+- `bootstrap.dependencies.get_session` là async generator DI đang được dùng bởi API; pipeline worker chủ động mở session theo từng thao tác.
 - PostgreSQL pooled dùng pool size/overflow/recycle/timeout theo cấu hình; `DB_POOL_MODE=null` chọn `NullPool` và không áp dụng size/overflow.
 - Giới hạn pool tính theo engine/process. Pool không phải giới hạn tổng connection của tất cả service cộng lại.
 - Alembic dùng async engine ngắn hạn với NullPool; không chạy `create_all` ở startup ứng dụng. `create_all` dùng trong fixture test cô lập.
@@ -932,20 +932,22 @@ Các giới hạn còn lại:
 | Muốn xem | File |
 |---|---|
 | Tạo app, middleware body/request ID, lifespan | [main.py](../src/company_ai/main.py) |
-| API endpoints và status HTTP | [api/routes.py](../src/company_ai/api/routes.py) |
-| Input/output HTTP | [api/schemas.py](../src/company_ai/api/schemas.py) |
-| Use case tạo/đọc/retry và enqueue gap | [application/jobs.py](../src/company_ai/application/jobs.py) |
-| Vòng lặp bốn bước, input hash và phân loại lỗi | [application/execute_workflow.py](../src/company_ai/application/execute_workflow.py) |
-| Heartbeat và failure hook | [application/step_executor.py](../src/company_ai/application/step_executor.py) |
-| Resume và giới hạn reconciliation | [application/recovery.py](../src/company_ai/application/recovery.py) |
-| Prompt và cost reservation | [application/prompts.py](../src/company_ai/application/prompts.py) |
-| Domain entities và điều kiện retry | [domain/entities.py](../src/company_ai/domain/entities.py) |
-| Policy ngân sách, recovery, evidence | [domain/policies.py](../src/company_ai/domain/policies.py) |
-| Scoring và schema checkpoint | [domain/scoring.py](../src/company_ai/domain/scoring.py), [domain/outputs.py](../src/company_ai/domain/outputs.py) |
-| Transaction, claim, fencing, scanner và metrics | [infrastructure/database/repositories.py](../src/company_ai/infrastructure/database/repositories.py) |
+| Gắn concrete dependency và cấp session HTTP | [bootstrap/dependencies.py](../src/company_ai/bootstrap/dependencies.py) |
+| Tạo/giải phóng engine và Redis client | [bootstrap/lifespan.py](../src/company_ai/bootstrap/lifespan.py) |
+| API endpoints và status HTTP | [api/research/router.py](../src/company_ai/api/research/router.py), [admin/router.py](../src/company_ai/api/admin/router.py), [health/router.py](../src/company_ai/api/health/router.py) |
+| Input/output HTTP | [api/research/schemas.py](../src/company_ai/api/research/schemas.py) |
+| Use case tạo/đọc/retry và enqueue gap | [application/research/jobs.py](../src/company_ai/application/research/jobs.py) |
+| Vòng lặp bốn bước, input hash và phân loại lỗi | [application/research/execute_workflow.py](../src/company_ai/application/research/execute_workflow.py) |
+| Heartbeat và failure hook | [application/research/step_executor.py](../src/company_ai/application/research/step_executor.py) |
+| Resume và giới hạn reconciliation | [application/research/recovery.py](../src/company_ai/application/research/recovery.py) |
+| Prompt và cost reservation | [application/research/prompts.py](../src/company_ai/application/research/prompts.py) |
+| Domain entities và điều kiện retry | [domain/research/entities.py](../src/company_ai/domain/research/entities.py) |
+| Policy ngân sách, recovery, evidence | [domain/research/policies.py](../src/company_ai/domain/research/policies.py) |
+| Scoring và schema checkpoint | [domain/research/scoring.py](../src/company_ai/domain/research/scoring.py), [domain/research/outputs.py](../src/company_ai/domain/research/outputs.py) |
+| Transaction, claim, fencing, scanner và metrics | [infrastructure/research/persistence/repositories.py](../src/company_ai/infrastructure/research/persistence/repositories.py) |
 | Async engine/session, DB retry và readiness | [infrastructure/database/session.py](../src/company_ai/infrastructure/database/session.py) |
-| ORM và ánh xạ domain | [infrastructure/database/models.py](../src/company_ai/infrastructure/database/models.py), [mapping.py](../src/company_ai/infrastructure/database/mapping.py) |
-| Crew và SDK request gate | [crew_factory.py](../src/company_ai/infrastructure/ai/crew_factory.py), [llm_adapter.py](../src/company_ai/infrastructure/ai/llm_adapter.py) |
+| ORM và ánh xạ domain | [infrastructure/research/persistence/models.py](../src/company_ai/infrastructure/research/persistence/models.py), [mapping.py](../src/company_ai/infrastructure/research/persistence/mapping.py) |
+| Crew và SDK request gate | [crew_factory.py](../src/company_ai/infrastructure/research/ai/crew_factory.py), [llm_adapter.py](../src/company_ai/infrastructure/research/ai/llm_adapter.py) |
 | Publish Celery | [infrastructure/messaging.py](../src/company_ai/infrastructure/messaging.py) |
 | Broker, queues và Beat schedules | [celery_app.py](../src/company_ai/celery_app.py) |
 | Task entrypoints | [tasks/ai_tasks.py](../src/company_ai/tasks/ai_tasks.py), [maintenance_tasks.py](../src/company_ai/tasks/maintenance_tasks.py) |

@@ -1,6 +1,6 @@
 """Business decisions independent of persistence, transport and AI frameworks."""
 
-from company_ai.domain.contracts import InvalidOutput
+from company_ai.domain.research.contracts import InvalidOutput
 
 
 def budget_allows(calls, estimated_spend, reservation, max_calls, max_usd):

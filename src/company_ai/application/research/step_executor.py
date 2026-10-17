@@ -1,7 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
 
-from company_ai.domain.contracts import InjectedCrash
+from company_ai.domain.research.contracts import InjectedCrash
 
 
 def inject_failure(settings, step, point):

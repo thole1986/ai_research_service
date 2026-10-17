@@ -5,9 +5,9 @@ from uuid import uuid4
 
 import pytest
 
-from company_ai.application.execute_workflow import run_workflow
-from company_ai.domain.contracts import InjectedCrash
-from company_ai.infrastructure.ai.llm_adapter import CrewAIAdapter
+from company_ai.application.research.execute_workflow import run_workflow
+from company_ai.domain.research.contracts import InjectedCrash
+from company_ai.infrastructure.research.ai.llm_adapter import CrewAIAdapter
 from company_ai.infrastructure.telemetry.langfuse import LangfuseObserver
 from tests.fakes import CountingAdapter
 

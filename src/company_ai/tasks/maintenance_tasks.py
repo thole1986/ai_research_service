@@ -1,4 +1,4 @@
-from company_ai.application.recovery import resume_pending
+from company_ai.application.research.recovery import resume_pending
 from company_ai.celery_app import celery_app
 from company_ai.infrastructure.messaging import publish
 from company_ai.runtime import run_async

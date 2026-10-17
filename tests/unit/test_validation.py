@@ -1,7 +1,7 @@
 import pytest
 
-from company_ai.domain.contracts import InvalidOutput
-from company_ai.domain.policies import validate_evidence
+from company_ai.domain.research.contracts import InvalidOutput
+from company_ai.domain.research.policies import validate_evidence
 from company_ai.settings import Settings
 
 

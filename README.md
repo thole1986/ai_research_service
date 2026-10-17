@@ -5,9 +5,12 @@ Each job runs **RESEARCH → CLASSIFY → SCORE → REPORT**. Every step has an 
 lease, fencing token, checkpoint and attempt audit. SCORE is deterministic Python.
 Company descriptions and optional website text are the only evidence; URLs are metadata.
 
-The code follows a pragmatic DDD layout: `domain` (entities/policies/scoring), `application`
-(use cases and ports), `infrastructure` (async SQLAlchemy, AI and messaging adapters), and
-`api` (HTTP). ORM objects stay in infrastructure; repository results are domain snapshots.
+The code follows a pragmatic DDD layout with `research` packages inside `domain`,
+`application`, `infrastructure` and `api`. Admin and health have separate API routers.
+`bootstrap` binds application ports to adapters through FastAPI dependency injection:
+request → service → repository → `AsyncSession`. Engines and Redis clients are created
+only in lifespan; `create_app(settings)` constructs no database or repository. Tests use
+`app.dependency_overrides`. ORM objects stay in infrastructure; repository results are domain snapshots.
 API, repository, workflow, heartbeat and OpenAI I/O are async. Celery's synchronous task
 entrypoints bridge into an event loop with an engine disposed before that loop closes.
 

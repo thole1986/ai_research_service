@@ -3,8 +3,8 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from company_ai.domain.contracts import STEPS
-from company_ai.domain.errors import Conflict
+from company_ai.domain.research.contracts import STEPS
+from company_ai.domain.research.errors import Conflict
 
 
 @dataclass(frozen=True)

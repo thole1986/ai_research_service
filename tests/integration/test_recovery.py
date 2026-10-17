@@ -4,11 +4,10 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select, update
 
-from company_ai.application.execute_workflow import run_workflow
-from company_ai.application.recovery import reconcile_unknown_step, resume_pending
-from company_ai.domain.contracts import InjectedCrash
-from company_ai.infrastructure.database.models import Event, Step, now
-from company_ai.main import create_app
+from company_ai.application.research.execute_workflow import run_workflow
+from company_ai.application.research.recovery import reconcile_unknown_step, resume_pending
+from company_ai.domain.research.contracts import InjectedCrash
+from company_ai.infrastructure.research.persistence.models import Event, Step, now
 from tests.fakes import CountingAdapter
 
 
@@ -41,7 +40,9 @@ async def test_score_crash_and_scanner_overlap(repo, payload):
     assert adapter.calls == ["RESEARCH", "CLASSIFY", "REPORT"]
 
 
-async def test_manual_retry_auth_ack_and_fence(repo, settings, payload, client_factory):
+async def test_manual_retry_auth_ack_and_fence(
+    repo, settings, payload, client_factory, app_factory
+):
     job, _ = await repo.create_job_idempotently("manual", payload)
 
     async def record(job_id):
@@ -52,7 +53,7 @@ async def test_manual_retry_auth_ack_and_fence(repo, settings, payload, client_f
     await expire(repo, job.id)
     await repo.scan_stale_steps()
     published = []
-    client = await client_factory(create_app(settings, repo, record))
+    client = await client_factory(app_factory(record))
     url = f"/api/v1/research/jobs/{job.id}/retry"
     headers = {"Authorization": "Bearer test-admin"}
     body = {"step_name": "RESEARCH", "acknowledge_possible_duplicate_charge": True}

@@ -1,6 +1,6 @@
 import re
 
-from company_ai.domain.outputs import ScoreOutput
+from company_ai.domain.research.outputs import ScoreOutput
 
 
 def score(research, classification):

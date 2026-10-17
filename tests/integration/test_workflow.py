@@ -6,10 +6,10 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import update
 
-from company_ai.application.execute_workflow import run_workflow
-from company_ai.domain.contracts import InjectedCrash, InvalidOutput, SafeFailure
-from company_ai.infrastructure.ai.llm_adapter import CrewAIAdapter
-from company_ai.infrastructure.database.models import Step, now
+from company_ai.application.research.execute_workflow import run_workflow
+from company_ai.domain.research.contracts import InjectedCrash, InvalidOutput, SafeFailure
+from company_ai.infrastructure.research.ai.llm_adapter import CrewAIAdapter
+from company_ai.infrastructure.research.persistence.models import Step, now
 from tests.fakes import CountingAdapter
 
 

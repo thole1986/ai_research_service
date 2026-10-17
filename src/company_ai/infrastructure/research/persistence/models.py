@@ -1,8 +1,10 @@
 from datetime import UTC, datetime
 from uuid import uuid4
+
 from sqlalchemy import JSON, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
+
 from company_ai.infrastructure.database.base import Base
 
 

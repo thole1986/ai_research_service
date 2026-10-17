@@ -1,4 +1,4 @@
-from company_ai.domain.contracts import AIResult
+from company_ai.domain.research.contracts import AIResult
 
 
 class CountingAdapter:

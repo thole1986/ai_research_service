@@ -1,17 +1,14 @@
-from contextlib import asynccontextmanager
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from redis.asyncio import Redis
 
-from company_ai.api.routes import router
-from company_ai.application.jobs import JobNotFound, JobService
-from company_ai.infrastructure.database.repositories import Repository
-from company_ai.infrastructure.database.session import Database
-from company_ai.infrastructure.messaging import publish
+from company_ai.api.router import router
+from company_ai.application.research.jobs import JobNotFound
+from company_ai.bootstrap.dependencies import configure_dependencies
+from company_ai.bootstrap.lifespan import lifespan
 from company_ai.observability import configure_logging, log_event
-from company_ai.settings import get_settings
+from company_ai.settings import Settings, get_settings
 
 
 class PayloadLimit:
@@ -48,28 +45,12 @@ class PayloadLimit:
         await self.app(scope, replay, send)
 
 
-def create_app(settings=None, repo=None, enqueue=None, broker_ping=None):
+def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_level)
-    owned_db = None if repo is not None else Database(settings.database_dsn, settings=settings)
-    repo = repo if repo is not None else Repository(owned_db, settings)
-    broker = Redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=2)
-
-    @asynccontextmanager
-    async def lifespan(app):
-        try:
-            yield
-        finally:
-            await broker.aclose()
-            if owned_db is not None:
-                await owned_db.dispose()
-
     app = FastAPI(title="AI Company Research", version="0.2.0", lifespan=lifespan)
     app.state.settings = settings
-    app.state.jobs = JobService(repo, enqueue or publish)
-    app.state.database = repo.db
-    app.state.database_ready = repo.db.ready
-    app.state.broker_ping = broker_ping or broker.ping
+    configure_dependencies(app)
     app.add_middleware(PayloadLimit, limit=settings.max_input_chars * 6 + 4096)
 
     @app.middleware("http")

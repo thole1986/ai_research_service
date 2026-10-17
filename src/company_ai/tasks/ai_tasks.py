@@ -1,9 +1,9 @@
 import asyncio
 
-from company_ai.application.execute_workflow import run_workflow
+from company_ai.application.research.execute_workflow import run_workflow
 from company_ai.celery_app import celery_app
-from company_ai.domain.contracts import InjectedCrash
-from company_ai.infrastructure.ai.llm_adapter import CrewAIAdapter
+from company_ai.domain.research.contracts import InjectedCrash
+from company_ai.infrastructure.research.ai.llm_adapter import CrewAIAdapter
 from company_ai.runtime import get_worker_observer, run_async
 
 

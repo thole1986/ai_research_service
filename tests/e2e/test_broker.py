@@ -8,15 +8,14 @@ import pytest
 from celery import Celery
 from celery.contrib.testing.worker import start_worker
 
-from company_ai.application.execute_workflow import run_workflow
-from company_ai.infrastructure.database.repositories import Repository
+from company_ai.application.research.execute_workflow import run_workflow
 from company_ai.infrastructure.database.session import Database
-from company_ai.main import create_app
+from company_ai.infrastructure.research.persistence.repositories import SqlAlchemyResearchRepository
 from tests.fakes import CountingAdapter
 
 
 @pytest.mark.skipif(os.environ.get("RUN_REDIS_E2E") != "1", reason="Opt-in real Redis test")
-async def test_api_broker_worker_checkpoints(repo, settings, payload, client_factory):
+async def test_api_broker_worker_checkpoints(repo, settings, payload, client_factory, app_factory):
     queue = f"company-ai-test-{uuid4()}"
     app = Celery("test", broker=os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/15"))
     app.conf.update(
@@ -36,7 +35,9 @@ async def test_api_broker_worker_checkpoints(repo, settings, payload, client_fac
                 db.engine = db.engine.execution_options(schema_translate_map=schema_map)
                 db.session.configure(bind=db.engine)
             try:
-                await run_workflow(job_id, Repository(db, settings), adapter, settings)
+                await run_workflow(
+                    job_id, SqlAlchemyResearchRepository(db, settings), adapter, settings
+                )
             finally:
                 await db.dispose()
 
@@ -55,7 +56,7 @@ async def test_api_broker_worker_checkpoints(repo, settings, payload, client_fac
     )
     await asyncio.to_thread(worker.__enter__)
     try:
-        client = await client_factory(create_app(settings, repo, publish))
+        client = await client_factory(app_factory(publish))
         response = await client.post(
             "/api/v1/research/jobs", json=payload, headers={"Idempotency-Key": queue}
         )

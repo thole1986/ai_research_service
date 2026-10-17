@@ -4,8 +4,8 @@ import asyncio
 from contextlib import asynccontextmanager
 from functools import lru_cache
 
-from company_ai.infrastructure.database.repositories import Repository
 from company_ai.infrastructure.database.session import Database
+from company_ai.infrastructure.research.persistence.repositories import SqlAlchemyResearchRepository
 from company_ai.infrastructure.telemetry.langfuse import create_observer
 from company_ai.settings import get_settings
 
@@ -21,7 +21,7 @@ async def repository():
     settings = get_settings()
     db = Database(settings.database_dsn, settings=settings)
     try:
-        yield Repository(db, settings)
+        yield SqlAlchemyResearchRepository(db, settings)
     finally:
         # Dispose on the owning loop BEFORE asyncio.run closes it. Never cache async engines
         # globally across Celery tasks, event loops or forked worker processes.

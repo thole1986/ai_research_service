@@ -11,9 +11,13 @@ os.environ["CREWAI_TELEMETRY_DISABLED"] = "true"
 os.environ["OTEL_SDK_DISABLED"] = "true"
 os.environ["CREWAI_STORAGE_DIR"] = "./data/crewai-tests"
 
+from company_ai.api.dependencies import get_broker_ping  # noqa: E402
+from company_ai.api.research.dependencies import get_job_publisher  # noqa: E402
+from company_ai.bootstrap.dependencies import get_database  # noqa: E402
 from company_ai.infrastructure.database.base import Base  # noqa: E402
-from company_ai.infrastructure.database.repositories import Repository  # noqa: E402
 from company_ai.infrastructure.database.session import Database  # noqa: E402
+from company_ai.infrastructure.research.persistence.repositories import SqlAlchemyResearchRepository  # noqa: E402
+from company_ai.main import create_app  # noqa: E402
 from company_ai.settings import Settings  # noqa: E402
 
 
@@ -49,12 +53,42 @@ async def repo(settings, request):
             db.session.configure(bind=db.engine)
         async with db.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
-        yield Repository(db, settings)
+        yield SqlAlchemyResearchRepository(db, settings)
     finally:
         if schema:
             async with db.engine.begin() as connection:
                 await connection.execute(DropSchema(schema, cascade=True))
         await db.dispose()
+
+
+@pytest.fixture
+def app_factory(repo, settings):
+    """Exercise production session/repository DI against the fixture-owned database."""
+
+    def create(enqueue=None):
+        app = create_app(settings)
+
+        async def database():
+            return repo.db
+
+        async def ping():
+            return True
+
+        async def broker_ping():
+            return ping
+
+        async def discard(_):
+            pass
+
+        async def publisher():
+            return enqueue if enqueue is not None else discard
+
+        app.dependency_overrides[get_database] = database
+        app.dependency_overrides[get_job_publisher] = publisher
+        app.dependency_overrides[get_broker_ping] = broker_ping
+        return app
+
+    return create
 
 
 @pytest.fixture
