@@ -84,7 +84,7 @@ class CollectedAdapter(CountingAdapter):
         super().__init__()
         self.repo, self.job_id = repo, job_id
 
-    async def execute(self, step, payload):
+    async def execute(self, step, payload, profile=None):
         self.calls.append(step)
         if step == "RESEARCH":
             if self.repo:

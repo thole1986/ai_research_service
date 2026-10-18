@@ -56,6 +56,16 @@ class JobAccepted(BaseModel):
     status_url: str
 
 
+class ExecutionMetadata(BaseModel):
+    """Public route identity, excluding endpoints, connection details and credentials."""
+
+    provider: str
+    model: str
+    profile_id: str
+    config_fingerprint: str
+    pricing_kind: Literal["estimated_token_rates", "local_unmetered"]
+
+
 class StepView(BaseModel):
     step_name: str
     status: str
@@ -64,6 +74,7 @@ class StepView(BaseModel):
     completed_at: datetime | None
     updated_at: datetime
     output: dict[str, Any] | None
+    execution_metadata: ExecutionMetadata | None = None
 
 
 class ErrorView(BaseModel):
@@ -81,6 +92,7 @@ class JobView(BaseModel):
     error: ErrorView | None
     steps: list[StepView]
     result: dict[str, Any] | None
+    execution_metadata: dict[str, ExecutionMetadata] | None = None
 
 
 class EventView(BaseModel):

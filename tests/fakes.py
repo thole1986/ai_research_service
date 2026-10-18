@@ -5,7 +5,10 @@ class CountingAdapter:
     def __init__(self):
         self.calls = []
 
-    async def execute(self, step, payload):
+    async def aclose(self):
+        pass
+
+    async def execute(self, step, payload, profile=None):
         self.calls.append(step)
         if step == "RESEARCH":
             output = {

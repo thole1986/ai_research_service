@@ -1,6 +1,11 @@
 # AI Company Research & Lead Qualification
 
-FastAPI → Redis/Celery → CrewAI/OpenAI, with async SQLite or PostgreSQL as the workflow source of truth.
+FastAPI → Redis/Celery → CrewAI with per-step OpenAI, Claude (Anthropic), or Ollama routing,
+with async SQLite or PostgreSQL as the workflow source of truth.
+
+OpenAI remains the default; Ollama is optional and does not need to be installed to run
+OpenAI or Claude jobs. See [per-step LLM routing](docs/llm-routing.vi.md) for typed JSON
+profiles, snapshot behavior, migration/restart instructions and desktop/Docker setup.
 By default, jobs run **RESEARCH → CLASSIFY → SCORE → REPORT** using operator-supplied text.
 Optional `collection_mode: "tavily"` adds **COLLECT** first to save Tavily web snippets before
 analysis. Every step has an atomic claim, lease, fencing token, checkpoint and attempt audit.
@@ -145,7 +150,7 @@ estimates exclude it. See the [collection guide](docs/tavily-collection.vi.md) f
 
 After cloning, complete the local/Docker setup above and check `GET /ready`.
 The API, AI worker, maintenance worker, Beat, database and Redis must be running.
-Submitting these examples uses the configured OpenAI account and incurs normal API usage.
+Submitting these examples uses the saved provider routes and incurs their configured API usage.
 
 | JSON file | Data | Demo scenario |
 |---|---|---|
@@ -231,7 +236,7 @@ when both keys and the SDK are present. `LANGFUSE_TRACING_ENABLED=false` disable
 Missing configuration/package or telemetry failures do not change workflow outcomes.
 
 Each execution creates a `company-research` trace with `job_id`, step/attempt metadata,
-checkpoint hits, nested OpenAI generations, token usage, estimated costs, and sanitized
+checkpoint hits, nested provider generations, token usage, estimated costs, and sanitized
 error categories. Raw company text, prompts, and outputs are excluded by default;
 set `LANGFUSE_CAPTURE_CONTENT=true` to include them. The worker uses a private tracer
 provider and drains spans off the event loop with a bounded timeout after each job.

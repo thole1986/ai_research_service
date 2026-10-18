@@ -19,6 +19,9 @@ def test_dependencies_point_toward_domain():
             "redis",
             "langfuse",
             "opentelemetry",
+            "openai",
+            "anthropic",
+            "httpx",
         ),
         "application": (
             "company_ai.infrastructure",
@@ -33,6 +36,9 @@ def test_dependencies_point_toward_domain():
             "redis",
             "langfuse",
             "opentelemetry",
+            "openai",
+            "anthropic",
+            "httpx",
         ),
         "api": (
             "company_ai.infrastructure",

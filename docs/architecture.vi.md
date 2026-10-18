@@ -1,5 +1,10 @@
 # Kiến trúc DDD, async và cấu hình database
 
+F002 tách bounded Crew wrapper khỏi transport provider, với registry OpenAI,
+Anthropic (Claude), Ollama và snapshot route theo job. Domain giữ typed profile,
+identity và pricing policy; application không import SDK. Xem [LLM routing](llm-routing.vi.md)
+cho cấu hình, hash/checkpoint compatibility và cách thêm adapter.
+
 ## 1. Đánh giá bản trước và thay đổi hiện tại
 
 Bản hiện tại áp dụng DDD cho bounded context **nghiên cứu và đánh giá doanh nghiệp**, chia package theo context trong từng tầng. Trước refactor DI, `create_app()` tạo một repository và `JobService` dùng chung trên `app.state`; factory còn cần truy cập `repo.db` nên fake repository phải biết chi tiết hạ tầng. Hiện factory chỉ cấu hình HTTP và đăng ký dependency; service/repository được resolve theo request.

@@ -1,5 +1,10 @@
 # Luồng end to end: các service tích hợp và xử lý tình huống
 
+F002 bổ sung provider/model riêng cho RESEARCH, CLASSIFY và REPORT qua snapshot của
+job: OpenAI mặc định, Claude (Anthropic) hoặc Ollama tùy cấu hình. COLLECT và SCORE
+giữ cách chạy hiện tại. Các mô tả OpenAI bên dưới là đường mặc định/legacy; xem
+[routing theo bước](llm-routing.vi.md) để cấu hình và xử lý lỗi cho các route mới.
+
 Tài liệu này giải thích **hành vi của mã nguồn hiện tại**, từ khi API nhận dữ liệu đến khi trả báo cáo, bao gồm các nhánh lỗi, phục hồi và giới hạn còn lại. Các giá trị mặc định nêu bên dưới lấy từ `settings.py`; `.env` và cấu hình Compose có thể ghi đè chúng.
 
 Đọc tài liệu này không cần khởi động hệ thống. Các JSON, ID và timeline minh họa không phải kết quả gọi OpenAI thực tế.

@@ -14,6 +14,7 @@ from company_ai.domain.research.contracts import (
 from company_ai.domain.research.entities import JobEvent, ResearchJob, ResearchStep
 from company_ai.domain.research.errors import Conflict
 from company_ai.domain.research.hashing import digest
+from company_ai.domain.research.llm import resolve_execution_config
 from company_ai.domain.research.policies import (
     budget_allows,
     expired_step_outcome,
@@ -48,6 +49,29 @@ def canonical_payload(payload):
     }
 
 
+EXECUTION_AUDIT_FIELDS = (
+    "provider",
+    "model",
+    "profile_id",
+    "config_fingerprint",
+    "pricing_kind",
+    "adapter_version",
+)
+
+
+def execution_audit(metadata):
+    """Persist only execution identity, never endpoint details or provider content."""
+    return {name: metadata[name] for name in EXECUTION_AUDIT_FIELDS if name in (metadata or {})}
+
+
+def attempt_audit(attempt):
+    return {
+        name: getattr(attempt, name)
+        for name in EXECUTION_AUDIT_FIELDS
+        if getattr(attempt, name) is not None
+    }
+
+
 class SqlAlchemyResearchRepository:
     """Research aggregate persistence; HTTP and workers inject their session scope."""
 
@@ -73,11 +97,15 @@ class SqlAlchemyResearchRepository:
         mode = payload.get("collection_mode", "manual")
 
         async def create(s):
+            existing = await s.scalar(select(Job).where(Job.idempotency_key == key))
+            if existing is not None:
+                return existing_job(existing)
             job = Job(
                 id=uid(),
                 idempotency_key=key,
                 request_hash=request_hash,
                 input_json=payload,
+                execution_config=resolve_execution_config(self.settings).model_dump(mode="json"),
                 workflow_version=(
                     COLLECTION_WORKFLOW_VERSION if mode == "tavily" else LEGACY_WORKFLOW_VERSION
                 ),
@@ -88,6 +116,13 @@ class SqlAlchemyResearchRepository:
             event(s, job.id, "JOB_CREATED")
             return (snapshot(ResearchJob, job), True)
 
+        def existing_job(job):
+            if job.request_hash != request_hash and canonical_payload(
+                job.input_json
+            ) != canonical_payload(payload):
+                raise Conflict("IDEMPOTENCY_KEY_CONFLICT")
+            return (snapshot(ResearchJob, job), False)
+
         try:
             return await self.db.write(create)
         except IntegrityError:
@@ -95,11 +130,7 @@ class SqlAlchemyResearchRepository:
                 job = await s.scalar(select(Job).where(Job.idempotency_key == key))
                 if job is None:
                     raise
-                if job.request_hash != request_hash and canonical_payload(
-                    job.input_json
-                ) != canonical_payload(payload):
-                    raise Conflict("IDEMPOTENCY_KEY_CONFLICT") from None
-                return (snapshot(ResearchJob, job), False)
+                return existing_job(job)
 
     async def get_job(self, job_id):
         async with self.db.session() as s:
@@ -225,9 +256,10 @@ class SqlAlchemyResearchRepository:
 
         return await self.db.write(operation_0)
 
-    async def request_started(self, claim, reserved_cost):
-        if claim.step_name == "COLLECT":
+    async def request_started(self, claim, reserved_cost, execution_metadata=None):
+        if claim.step_name not in ("RESEARCH", "CLASSIFY", "REPORT"):
             return False
+        audit = execution_audit(execution_metadata)
 
         async def start(s):
             await self._lock_job(s, claim.job_id)
@@ -236,7 +268,12 @@ class SqlAlchemyResearchRepository:
             ).rowcount != 1:
                 return False
             attempt = await s.get(Attempt, claim.attempt_id)
-            if attempt is None or attempt.status != "CLAIMED":
+            if (
+                attempt is None
+                or attempt.step_id != claim.step_id
+                or attempt.lease_token != claim.token
+                or attempt.status != "CLAIMED"
+            ):
                 return False
             job = await s.get(Job, claim.job_id)
             calls = await s.scalar(
@@ -257,16 +294,106 @@ class SqlAlchemyResearchRepository:
                 update(Attempt)
                 .where(Attempt.id == claim.attempt_id)
                 .values(
-                    status="REQUEST_STARTED", llm_started_at=now(), estimated_cost_usd=reserved_cost
+                    status="REQUEST_STARTED",
+                    llm_started_at=now(),
+                    estimated_cost_usd=reserved_cost,
+                    **audit,
                 )
             )
             job.total_estimated_cost_usd = float(job.total_estimated_cost_usd) + reserved_cost
             event(
-                s, claim.job_id, "LLM_REQUEST_STARTED", claim.step_id, attempt_id=claim.attempt_id
+                s,
+                claim.job_id,
+                "LLM_REQUEST_STARTED",
+                claim.step_id,
+                attempt_id=claim.attempt_id,
+                **audit,
             )
             return True
 
         return await self.db.write(start)
+
+    async def pin_model_identity(self, claim, profile_key, digest):
+        """Record the first metadata check under the same lock and lease as dispatch."""
+        if claim.step_name not in ("RESEARCH", "CLASSIFY", "REPORT"):
+            return False
+
+        async def pin(s):
+            await self._lock_job(s, claim.job_id)
+            if (
+                await s.execute(update(Step).where(self.fence(claim)).values(updated_at=now()))
+            ).rowcount != 1:
+                return False
+            attempt = await s.get(Attempt, claim.attempt_id)
+            if (
+                attempt is None
+                or attempt.step_id != claim.step_id
+                or attempt.lease_token != claim.token
+                or attempt.status != "CLAIMED"
+            ):
+                return False
+            job = await s.get(Job, claim.job_id)
+            identities = dict(job.execution_identity or {})
+            identity = {"digest": digest, "verified": digest is not None}
+            if profile_key in identities:
+                return identities[profile_key] == identity
+            identities[profile_key] = identity
+            job.execution_identity = identities
+            event(
+                s,
+                claim.job_id,
+                "MODEL_IDENTITY_PINNED",
+                claim.step_id,
+                attempt_id=claim.attempt_id,
+                identity_verified=digest is not None,
+            )
+            return True
+
+        return await self.db.write(pin)
+
+    async def record_llm_usage(self, claim, result, cost):
+        """Retain known usage for a response rejected after generation, under fencing."""
+        if claim.step_name not in ("RESEARCH", "CLASSIFY", "REPORT"):
+            return False
+
+        async def record(s):
+            await self._lock_job(s, claim.job_id)
+            if (
+                await s.execute(update(Step).where(self.fence(claim)).values(updated_at=now()))
+            ).rowcount != 1:
+                return False
+            attempt = await s.get(Attempt, claim.attempt_id)
+            if (
+                attempt is None
+                or attempt.step_id != claim.step_id
+                or attempt.lease_token != claim.token
+                or attempt.status != "REQUEST_STARTED"
+            ):
+                return False
+            attempt.tokens_input, attempt.tokens_output = result.tokens_input, result.tokens_output
+            attempt.provider_request_id = result.provider_request_id
+            if cost is not None:
+                job = await s.get(Job, claim.job_id)
+                job.total_estimated_cost_usd = max(
+                    0,
+                    float(job.total_estimated_cost_usd)
+                    - float(attempt.estimated_cost_usd or 0)
+                    + cost,
+                )
+                attempt.estimated_cost_usd = cost
+            event(
+                s,
+                claim.job_id,
+                "LLM_USAGE_RECORDED",
+                claim.step_id,
+                attempt_id=claim.attempt_id,
+                usage_known=result.tokens_input is not None and result.tokens_output is not None,
+                cost_reconciled=cost is not None,
+                **attempt_audit(attempt),
+            )
+            return True
+
+        return await self.db.write(record)
 
     async def collection_request_started(self, claim):
         if claim.step_name != "COLLECT":
@@ -361,6 +488,7 @@ class SqlAlchemyResearchRepository:
                 claim.step_id,
                 attempt_id=claim.attempt_id,
                 step_name=claim.step_name,
+                **attempt_audit(attempt),
             )
             steps = list(await s.scalars(select(Step).where(Step.job_id == claim.job_id)))
             if all((step.status == "COMPLETED" for step in steps)):
@@ -397,6 +525,7 @@ class SqlAlchemyResearchRepository:
             claim.step_id,
             attempt_id=claim.attempt_id,
             error_category=category,
+            **attempt_audit(attempt),
         )
         return True
 
@@ -600,6 +729,22 @@ class SqlAlchemyResearchRepository:
                     collection_usage[name] = collection_usage.get(name, 0) + amount
                 if record.get("credits") is not None:
                     collection_credits = (collection_credits or 0) + record["credits"]
+            llm_usage = (
+                await s.execute(
+                    select(
+                        Attempt.provider,
+                        Attempt.model,
+                        Attempt.pricing_kind,
+                        func.count(Attempt.id).label("calls"),
+                        func.sum(Attempt.tokens_input).label("tokens_input"),
+                        func.sum(Attempt.tokens_output).label("tokens_output"),
+                        func.sum(Attempt.estimated_cost_usd).label("estimated_cost_usd"),
+                    )
+                    .where(Attempt.llm_started_at.is_not(None))
+                    .group_by(Attempt.provider, Attempt.model, Attempt.pricing_kind)
+                    .order_by(Attempt.provider, Attempt.model, Attempt.pricing_kind)
+                )
+            ).mappings()
             return {
                 "jobs": dict(
                     (await s.execute(select(Job.status, func.count()).group_by(Job.status))).all()
@@ -617,6 +762,18 @@ class SqlAlchemyResearchRepository:
                 "llm_calls": await s.scalar(
                     select(func.count(Attempt.id)).where(Attempt.llm_started_at.is_not(None))
                 ),
+                "llm_usage": [
+                    {
+                        "provider": record["provider"],
+                        "model": record["model"],
+                        "pricing_kind": record["pricing_kind"],
+                        "calls": record["calls"],
+                        "tokens_input": record["tokens_input"],
+                        "tokens_output": record["tokens_output"],
+                        "estimated_cost_usd": float(record["estimated_cost_usd"] or 0),
+                    }
+                    for record in llm_usage
+                ],
                 "collection_calls": await s.scalar(
                     select(func.count(Attempt.id)).where(Attempt.collection_started_at.is_not(None))
                 ),

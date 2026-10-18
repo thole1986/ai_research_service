@@ -1,5 +1,8 @@
 # Dịch vụ nghiên cứu doanh nghiệp và đánh giá khách hàng tiềm năng bằng AI
 
+F002 hỗ trợ OpenAI, Claude (Anthropic) và Ollama theo từng bước, với snapshot bất biến
+cho mỗi job. Mặc định vẫn OpenAI; không cần cài Ollama. Xem [cấu hình LLM routing](llm-routing.vi.md).
+
 Xem [Bản đồ hệ thống: sơ đồ, thành phần và luồng DDD](system-map.vi.md) để nắm tổng quan trước khi đọc code.
 
 Giải thích chi tiết từ API đến báo cáo, các service tích hợp và cách xử lý lỗi: [Luồng end to end](end-to-end.vi.md).
@@ -363,7 +366,8 @@ Có đủ hai key và package thì tracing tự bật. Thiếu key, chưa cài p
 Langfuse; telemetry riêng của CrewAI vẫn tắt qua `CREWAI_TELEMETRY_DISABLED=true`.
 
 Mỗi lượt thực thi tạo trace `company-research`, tra cứu qua metadata `job_id`.
-Bên dưới là span của từng step và generation `openai.chat.completions`, với
+Bên dưới là span của từng step và generation `openai.chat.completions`, `anthropic.messages`
+hoặc `ollama.chat` theo route thực tế, với
 `attempt_id`, model, thời gian, token, chi phí ước tính và mã lỗi đã lọc.
 COLLECT có span `external_collection` riêng, không có model/generation LLM;
 query, URL và text nguồn cũng chỉ được capture khi opt-in, không đưa vào metadata mặc định.

@@ -73,10 +73,50 @@ def provider_schema(step, payload):
 
 
 def reserve_cost(step, payload, settings):
-    # UTF-8 bytes upper-bound ordinary tokenizer token counts; add schema/framing allowance.
-    size = len(canonical(messages(step, payload)).encode())
-    size += len(canonical(provider_schema(step, payload)).encode()) + 1024
-    return (
-        size * settings.input_usd_per_million
-        + settings.max_output_tokens_per_step * settings.output_usd_per_million
-    ) / 1_000_000
+    from company_ai.domain.research.llm import legacy_profile, reserve_profile_cost
+
+    return reserve_profile_cost(
+        legacy_profile(settings, step), messages(step, payload), provider_schema(step, payload)
+    )
+
+
+WIRE_SCHEMA_VERSION = "provider-subset-v1"
+
+
+def provider_wire_schema(step, payload, provider):
+    """Keep the full domain contract local; send only the supported wire subset.
+
+    Local validation still enforces lengths and list bounds, including constraints
+    not expressed by the provider's structured-output schema.
+    """
+    schema = provider_schema(step, payload)
+    if provider not in ("openai", "anthropic"):
+        return schema
+    unsupported = {
+        "minLength",
+        "maxLength",
+        "pattern",
+        "format",
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+        "default",
+    }
+
+    def convert(node):
+        if isinstance(node, list):
+            return [convert(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        converted = {key: convert(value) for key, value in node.items() if key not in unsupported}
+        if converted.get("type") == "object":
+            converted["additionalProperties"] = False
+            converted["required"] = list(converted.get("properties", {}))
+        return converted
+
+    return convert(schema)

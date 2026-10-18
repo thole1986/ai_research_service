@@ -41,6 +41,8 @@ class ResearchJob:
     updated_at: datetime
     completed_at: datetime | None
     workflow_version: str = LEGACY_WORKFLOW_VERSION
+    execution_config: dict | None = None
+    execution_identity: dict | None = None
 
     @property
     def can_execute(self):

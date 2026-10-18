@@ -1,5 +1,10 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from company_ai.domain.research.llm import ResolvedProfile
 
 STEPS = ("RESEARCH", "CLASSIFY", "SCORE", "REPORT")
 ALL_STEPS = ("COLLECT", *STEPS)
@@ -35,10 +40,18 @@ class AIResult:
     tokens_input: int | None = None
     tokens_output: int | None = None
     provider_request_id: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    finish_category: str | None = None
+    provider_metadata: dict | None = None
 
 
 class LLMAdapter(Protocol):
-    async def execute(self, step: str, payload: dict) -> AIResult: ...
+    async def execute(
+        self, step: str, payload: dict, profile: ResolvedProfile | None = None
+    ) -> AIResult: ...
+
+    async def aclose(self) -> None: ...
 
 
 class SafeFailure(Exception):
@@ -47,6 +60,11 @@ class SafeFailure(Exception):
 
 class InvalidOutput(Exception):
     """Provider returned data which does not satisfy our contract."""
+
+    def __init__(self, category: str, *, result: AIResult | None = None):
+        super().__init__(category)
+        # Normalized usage only; rejected raw content never belongs in exception/audit.
+        self.result = result
 
 
 def output_error_category(exc):
@@ -78,6 +96,12 @@ def output_error_category(exc):
         "COLLECT_NO_USABLE_SOURCES",
         "UNSUPPORTED_REPORT_SOURCE",
         "MISSING_REPORT_LIMITATIONS",
+        "EXECUTION_CONFIG_UNAVAILABLE",
+        "CONTEXT_LIMIT_EXCEEDED",
+        "CONTEXT_WINDOW_EXCEEDED",
+        "MODEL_NOT_AVAILABLE",
+        "MODEL_IDENTITY_CHANGED",
+        "PROVIDER_RESPONSE_INVALID",
     }
     if isinstance(exc, InvalidOutput) and str(exc) in categories:
         return str(exc)

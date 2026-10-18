@@ -9,7 +9,7 @@ from sqlalchemy import update
 from company_ai.application.research.execute_workflow import run_workflow
 from company_ai.domain.research.contracts import InjectedCrash, InvalidOutput, SafeFailure
 from company_ai.infrastructure.research.ai.llm_adapter import CrewAIAdapter
-from company_ai.infrastructure.research.persistence.models import Step, now
+from company_ai.infrastructure.research.persistence.models import Job, Step, now
 from tests.fakes import CountingAdapter
 
 
@@ -57,7 +57,7 @@ async def test_full_job_with_actual_crewai_and_mock_provider(repo, payload):
 
 async def test_icp_text_is_not_automatically_company_evidence(repo, payload):
     class ParaphrasingAdapter(CountingAdapter):
-        async def execute(self, step, data):
+        async def execute(self, step, data, profile=None):
             result = await super().execute(step, data)
             if step == "CLASSIFY":
                 result.output["matching_signals"] = [payload["icp"]]
@@ -79,7 +79,7 @@ async def test_icp_text_is_not_automatically_company_evidence(repo, payload):
 )
 async def test_classify_error_is_actionable_and_sanitized(repo, payload, failure, category):
     class FailingClassification(CountingAdapter):
-        async def execute(self, step, data):
+        async def execute(self, step, data, profile=None):
             if step == "CLASSIFY":
                 raise InvalidOutput(failure)
             return await super().execute(step, data)
@@ -110,6 +110,11 @@ async def test_checkpoint_resume_and_version_change(repo, payload):
     assert (await repo.get_job(job.id))[0].status == "COMPLETED"
     assert adapter.calls == ["RESEARCH", "CLASSIFY", "REPORT"]
     second, _ = await repo.create_job_idempotently("version", payload)
+
+    async def make_legacy(session):
+        await session.execute(update(Job).where(Job.id == second.id).values(execution_config=None))
+
+    await repo.db.write(make_legacy)
     repo.settings.failure_point = "checkpoint"
     with pytest.raises(InjectedCrash):
         await run_workflow(second.id, repo, adapter, repo.settings)

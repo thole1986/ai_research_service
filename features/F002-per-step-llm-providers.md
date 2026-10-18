@@ -1,11 +1,14 @@
 # F002 — Chọn LLM provider và model theo từng step
 
-- Trạng thái: READY — chưa triển khai.
+- Trạng thái: IMPLEMENTED — 2026-10-18.
 - Ngày tạo: 2026-10-17.
-- Providers v1: OpenAI và Ollama local qua native API.
+- Providers triển khai: OpenAI, Claude (Anthropic Messages) và Ollama local qua native API.
+- Điều chỉnh 2026-10-18 theo yêu cầu: máy hiện tại dùng OpenAI/Claude, Ollama là tùy chọn
+  để thử sau trên desktop; giữ registry mở rộng cho các provider tương lai.
 - Use case chính: RESEARCH/CLASSIFY dùng OpenAI, REPORT dùng Ollama.
 - Có thể triển khai độc lập hoặc sau F001; đối chiếu code F001 nếu đã triển khai.
-- Đây là kế hoạch thực hiện, không phải mô tả khả năng hiện có.
+- Đặc tả và bằng chứng triển khai được ghi dưới đây; hướng dẫn vận hành tại
+  [LLM routing](../docs/llm-routing.vi.md).
 
 ## 1. Mục tiêu và quyết định phạm vi
 
@@ -24,7 +27,8 @@ REPORT: profile report → OpenAI hoặc Ollama
 Mỗi step có đúng một route được cố định khi tạo job. Không tự fallback provider,
 không repair output bằng lượt LLM bổ sung, không gọi nhiều model để bỏ phiếu.
 Không thêm agent tool loop, streaming, UI, model download, benchmark hoặc hỗ trợ
-Anthropic/Gemini/Bedrock trong v1. Kiến trúc cho phép thêm adapter sau này.
+Gemini/Bedrock trong v1. Claude được bổ sung theo yêu cầu ngày 2026-10-18;
+kiến trúc cho phép thêm adapter sau này.
 Chọn route bằng cấu hình operator, không nhận URL/model tùy ý từ public request.
 
 ## 2. Code hiện tại và điểm cần tách
@@ -273,18 +277,18 @@ Tài liệu chạy local/Docker:
 
 ## 11. Checklist triển khai theo thứ tự
 
-- [ ] Đọc repo hiện tại, F001 nếu đã triển khai, AGENTS.md và tài liệu provider chính thức.
-- [ ] Chốt typed config/profile/request/result/errors và chính sách compatibility.
-- [ ] Thêm config resolver + validation và mapping từ env legacy.
-- [ ] Thêm migration, snapshot bất biến lúc tạo job và attempt execution audit.
-- [ ] Tách bounded Crew wrapper khỏi transport OpenAI, bảo toàn behavior hiện tại.
-- [ ] Thêm Ollama native adapter và provider registry/lifecycle wiring.
-- [ ] Đổi workflow/hash/context guard/budget policy sang profile từng step.
-- [ ] Cập nhật lỗi/recovery/admin retry, usage, telemetry và API metadata sanitized.
-- [ ] Viết tests mục 12, sửa regression và chạy check phù hợp.
-- [ ] Cập nhật .env.example, README, docs tiếng Việt và ví dụ routing JSON.
-- [ ] Ghi migration/config/restart instructions và giới hạn model identity/quality.
-- [ ] Cập nhật trạng thái F002/index và bằng chứng hoàn thành mục 14.
+- [x] Đọc repo hiện tại, F001 nếu đã triển khai, AGENTS.md và tài liệu provider chính thức.
+- [x] Chốt typed config/profile/request/result/errors và chính sách compatibility.
+- [x] Thêm config resolver + validation và mapping từ env legacy.
+- [x] Thêm migration, snapshot bất biến lúc tạo job và attempt execution audit.
+- [x] Tách bounded Crew wrapper khỏi transport OpenAI, bảo toàn behavior hiện tại.
+- [x] Thêm Ollama native adapter và provider registry/lifecycle wiring; bổ sung Claude theo yêu cầu.
+- [x] Đổi workflow/hash/context guard/budget policy sang profile từng step.
+- [x] Cập nhật lỗi/recovery/admin retry, usage, telemetry và API metadata sanitized.
+- [x] Viết tests mục 12, sửa regression và chạy check phù hợp.
+- [x] Cập nhật .env.example, README, docs tiếng Việt và ví dụ routing JSON.
+- [x] Ghi migration/config/restart instructions và giới hạn model identity/quality.
+- [x] Cập nhật trạng thái F002/index và bằng chứng hoàn thành mục 14.
 
 ## 12. Kiểm thử bắt buộc
 
@@ -337,5 +341,49 @@ Các nguồn chính thức đã đối chiếu khi soạn (2026-10-17), đọc l
 
 ## 14. Bằng chứng hoàn thành
 
-Chưa triển khai. Khi hoàn thành ghi ngày, thay đổi chính, migration/config cần áp dụng,
-commands/checks và kết quả thực tế, smoke/model/hardware nếu có, và giới hạn còn lại.
+Triển khai ngày **2026-10-18**, gồm Claude theo yêu cầu bổ sung của người dùng.
+Hướng dẫn: [LLM routing](../docs/llm-routing.vi.md); cấu hình mẫu:
+[OpenAI + Claude](../examples/llm-routing/openai-claude.json),
+[OpenAI + Ollama](../examples/llm-routing/openai-ollama.json).
+
+- Typed config/profile, endpoint fingerprint, snapshot version và pricing theo từng
+  route. Env cũ tiếp tục tạo route OpenAI; all-Ollama không cần OpenAI key. Không cần
+  cài Ollama để chạy OpenAI/Claude. Registry có ba transport độc lập, cho phép thêm
+  adapter mà không sửa business workflow.
+- Snapshot lưu cùng transaction tạo job/steps; idempotency giữ job/snapshot cũ khi
+  đổi env. Legacy không snapshot giữ OpenAI/hash/schema cũ. Resume, retry, digest
+  pin, lease/context/version checks không tự đổi route hoặc fallback.
+- Bounded Crew giữ đúng một generation mỗi attempt. OpenAI Chat Completions,
+  Anthropic Messages và Ollama native dùng schema riêng; local Pydantic/evidence
+  validation giữ đầy đủ constraint. Không repair, pull model, stream hoặc bật tools.
+- Audit/metrics/API metadata dùng provider/model/profile thực tế, không lộ endpoint,
+  key hoặc thinking. Pricing DB và telemetry dùng chung policy; usage đã biết của
+  rejected output vẫn được reconcile, timeout/crash chưa rõ giữ reservation.
+- Migration **`26a1018_llm_execution_config`** thêm nullable config/identity và attempt
+  audit. Chạy `alembic upgrade head` trước khi restart API/worker/Beat. Không sửa
+  `.env` hoặc database/queue ứng dụng trong quá trình kiểm thử.
+- Baseline trước thay đổi: **177 passed, 70 skipped**, 22,37 giây; PostgreSQL/Redis
+  optional chưa bật trong baseline.
+- Full suite cuối: `python -m pytest -q --disable-warnings --show-capture=no --tb=short
+  --basetemp data/pytest-f002-final`, bật `TEST_POSTGRES_URL`, `RUN_REDIS_E2E=1`,
+  `TEST_REDIS_URL` trỏ vào container test tạm: **431 passed, 0 skipped**, 127,57 giây.
+  PostgreSQL **16.15**, Redis **7.4.11**; 1244 dependency warnings được ghi nhận.
+- API → CrewAI thật → mock SDK/native HTTP → DB: mixed OpenAI/Claude và
+  OpenAI/Ollama, có/không Tavily; invalid JSON chỉ một generation, usage được lưu.
+  Fencing, concurrency, crash, selected-route credential, privacy và loop ownership
+  đều có regression tests.
+- SQLite và PostgreSQL thật: upgrade/downgrade/upgrade, `alembic check` không drift;
+  replay legacy pending/partial/completed cần lần lượt **3/2/0** generation mock,
+  dù cấu hình route hiện tại đã đổi sang Ollama. SQLite downgrade giữ các bảng có
+  foreign key bằng native DROP COLUMN (SQLite >= 3.35).
+- `ruff check .`, `ruff format --check .` (**114 files already formatted**),
+  `git diff --check`, `uv --cache-dir .uv-cache lock --check --offline` và
+  `docker compose config --quiet` đều pass. OpenAI SDK là dependency trực tiếp;
+  lockfile hợp lệ, không đổi dependency version ngoài phạm vi cần thiết.
+
+Không chạy smoke provider thật, không tải weights/cài Ollama; model/hardware local
+và chất lượng nội dung thực tế **chưa được xác minh**. Ollama cloud endpoint/tag đã
+biết bị chặn; endpoint tự quản vẫn do operator khai báo API không tính phí. Digest
+metadata chưa xác định được lưu là unverified; race giữa metadata và generation vẫn
+còn, không cam kết tái lập weights hoặc billing exactly-once. Chi phí là ước lượng
+API charge, không gồm phần cứng/điện/vận hành.

@@ -6,10 +6,23 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from company_ai.application.research.prompts import messages, provider_schema
-from company_ai.domain.research.contracts import AIResult, InvalidOutput, SafeFailure
+from company_ai.application.research.prompts import messages, provider_schema, provider_wire_schema
+from company_ai.domain.research.contracts import AIResult, InvalidOutput
+from company_ai.domain.research.hashing import digest
+from company_ai.domain.research.llm import (
+    estimate_input_tokens,
+    legacy_profile,
+    price_usage,
+    validate_profile_runtime,
+)
 from company_ai.domain.research.outputs import schema_for
 from company_ai.infrastructure.research.ai.crew_factory import make_crew
+from company_ai.infrastructure.research.ai.transports import (
+    LLMRequest,
+    LoopOwnedTransport,
+    OpenAITransport,
+    create_transports,
+)
 from company_ai.observability import NoOpObserver
 
 
@@ -21,22 +34,33 @@ def configure_crewai():
     )
 
 
-def bounded_llm(settings, step, payload, client, observer=None):
+def bounded_llm(
+    settings, step, payload, client=None, observer=None, *, profile=None, transport=None
+):
     configure_crewai()
     from crewai import BaseLLM
-    from openai import APIStatusError
 
     observer = observer or NoOpObserver()
+    resolved = profile or legacy_profile(settings, step)
+    transport = transport or OpenAITransport(settings, client)
+    output_type = schema_for(step, payload)
+    domain_schema = provider_schema(step, payload)
+    request = LLMRequest(
+        step=step,
+        messages=messages(step, payload),
+        output_schema=domain_schema,
+        wire_schema=(
+            provider_wire_schema(step, payload, resolved.provider) if profile else domain_schema
+        ),
+        schema_name=output_type.__name__,
+        profile=resolved,
+    )
 
-    class BoundedOpenAI(BaseLLM):
-        """Exactly one SDK request per Crew, with transport retries explicitly disabled.
-
-        The trusted prompt is materialized here, so Crew's formatting/repair prompts cannot
-        add calls or reinterpret user text as instructions. No tools are exposed.
-        """
+    class BoundedProviderLLM(BaseLLM):
+        """One generation per real Crew, using only the materialized trusted messages."""
 
         def __init__(self):
-            super().__init__(model=settings.openai_model, temperature=settings.llm_temperature)
+            super().__init__(model=resolved.model, temperature=resolved.temperature)
             self.result = None
             self.failure = None
             self.calls = 0
@@ -50,104 +74,109 @@ def bounded_llm(settings, step, payload, client, observer=None):
                 if self.calls:
                     if self.failure is None:
                         self.failure = InvalidOutput("ADDITIONAL_PROVIDER_CALL_BLOCKED")
+                        self.failure.result = self.result
                     raise self.failure
                 self.calls += 1
+            usage_result = None
             try:
                 with observer.span(
-                    "openai.chat.completions",
+                    {
+                        "openai": "openai.chat.completions",
+                        "ollama": "ollama.chat",
+                        "anthropic": "anthropic.messages",
+                    }[resolved.provider],
                     generation=True,
-                    model=settings.openai_model,
+                    model=resolved.model,
                     model_parameters={
-                        "temperature": settings.llm_temperature,
-                        "max_tokens": settings.max_output_tokens_per_step,
-                        "response_format": "json_schema",
+                        "temperature": resolved.temperature,
+                        "max_tokens": resolved.max_output_tokens,
+                        "response_format": resolved.capability_mode,
+                        "context_window_tokens": resolved.context_window_tokens,
                     },
-                    metadata={"step_name": step},
-                    input=provider_messages,
+                    metadata={
+                        "step_name": step,
+                        "provider": resolved.provider,
+                        "profile_id": resolved.profile_id,
+                        "config_fingerprint": resolved.config_fingerprint,
+                        "pricing_kind": resolved.pricing.kind,
+                    },
+                    input=request.messages,
                 ) as generation:
-                    response = await client.chat.completions.create(
-                        model=settings.openai_model,
-                        messages=provider_messages,
-                        temperature=settings.llm_temperature,
-                        max_tokens=settings.max_output_tokens_per_step,
-                        response_format={
-                            "type": "json_schema",
-                            "json_schema": {
-                                "name": schema_for(step, payload).__name__,
-                                "strict": True,
-                                "schema": provider_schema(step, payload),
-                            },
-                        },
+                    response = await transport.generate(request)
+                    usage_result = AIResult(
+                        output={},
+                        tokens_input=response.tokens_input,
+                        tokens_output=response.tokens_output,
+                        provider_request_id=response.provider_request_id,
+                        provider=resolved.provider,
+                        model=resolved.model,
+                        finish_category=response.finish_category,
+                        provider_metadata=response.metadata,
                     )
-                    usage = getattr(response, "usage", None)
-                    usage_details = {}
+                    usage_details = {
+                        key: value
+                        for key, value in (
+                            ("input", response.tokens_input),
+                            ("output", response.tokens_output),
+                        )
+                        if value is not None
+                    }
                     cost_details = {}
-                    if usage is not None:
-                        usage_details = {
-                            "input": usage.prompt_tokens,
-                            "output": usage.completion_tokens,
-                        }
-                        cost_details = {
-                            "input": usage.prompt_tokens * settings.input_usd_per_million / 1e6,
-                            "output": usage.completion_tokens
-                            * settings.output_usd_per_million
-                            / 1e6,
-                        }
-                    choice = response.choices[0]
+                    cost = price_usage(resolved, response.tokens_input, response.tokens_output)
+                    if cost is not None:
+                        cost_details = {"total": cost}
+                        if response.tokens_input is not None and response.tokens_output is not None:
+                            cost_details = {
+                                "input": price_usage(resolved, response.tokens_input, 0),
+                                "output": price_usage(resolved, 0, response.tokens_output),
+                            }
                     generation.update(
-                        output=choice.message.content,
+                        output=response.content,
                         usage_details=usage_details,
                         cost_details=cost_details,
                         metadata={
-                            "provider_request_id": getattr(response, "_request_id", None),
-                            "finish_reason": choice.finish_reason,
+                            **response.metadata,
+                            "provider": resolved.provider,
+                            "provider_request_id": response.provider_request_id,
+                            "finish_reason": response.finish_category,
                             "cost_is_estimate": True,
+                            "pricing_kind": resolved.pricing.kind,
                         },
                     )
-                    if choice.message.refusal:
-                        raise InvalidOutput("PROVIDER_REFUSED_OUTPUT")
-                    if choice.finish_reason == "length":
-                        raise InvalidOutput("OUTPUT_TOKEN_LIMIT_REACHED")
-                    if choice.finish_reason == "content_filter":
-                        raise InvalidOutput("PROVIDER_CONTENT_FILTERED")
-                    if choice.finish_reason != "stop":
-                        raise InvalidOutput("INCOMPLETE_OR_REFUSED_OUTPUT")
-                    output = schema_for(step, payload).model_validate_json(
-                        choice.message.content or ""
-                    )
+                    errors = {
+                        "refused": "PROVIDER_REFUSED_OUTPUT",
+                        "length": "OUTPUT_TOKEN_LIMIT_REACHED",
+                        "content_filter": "PROVIDER_CONTENT_FILTERED",
+                    }
+                    if response.finish_category != "stop":
+                        raise InvalidOutput(
+                            errors.get(response.finish_category, "INCOMPLETE_OR_REFUSED_OUTPUT")
+                        )
+                    output = output_type.model_validate_json(response.content)
                     self.result = AIResult(
-                        output.model_dump(),
-                        usage.prompt_tokens if usage else None,
-                        usage.completion_tokens if usage else None,
-                        getattr(response, "_request_id", None),
+                        output=output.model_dump(),
+                        tokens_input=response.tokens_input,
+                        tokens_output=response.tokens_output,
+                        provider_request_id=response.provider_request_id,
+                        provider=resolved.provider,
+                        model=resolved.model,
+                        finish_category=response.finish_category,
+                        provider_metadata=response.metadata,
                     )
                     return "Final Answer: " + output.model_dump_json()
-            except APIStatusError as exc:
-                # Only explicit 429 rejection is automatically retryable. No SDK retry.
-                categories = {
-                    400: "PROVIDER_REQUEST_INVALID",
-                    401: "PROVIDER_AUTHENTICATION_FAILED",
-                    403: "PROVIDER_PERMISSION_DENIED",
-                    404: "PROVIDER_MODEL_NOT_FOUND",
-                    422: "PROVIDER_REQUEST_INVALID",
-                }
-                if exc.status_code == 429:
-                    self.failure = SafeFailure("RATE_LIMITED")
-                elif exc.status_code in categories:
-                    self.failure = InvalidOutput(categories[exc.status_code])
-                else:
-                    self.failure = exc
-                raise self.failure from None
             except ValidationError:
                 self.failure = InvalidOutput("INVALID_STRUCTURED_OUTPUT")
+                self.failure.result = usage_result
                 raise self.failure from None
             except Exception as exc:
+                if isinstance(exc, InvalidOutput) and usage_result is not None:
+                    exc.result = usage_result
                 self.failure = exc
                 raise
 
         def call(self, *args, **kwargs):
-            # CrewAI 1.15's native async executor still calls this hook from a worker
-            # thread. Marshal onto the owning loop; the SDK and all provider I/O stay async.
+            # CrewAI calls this hook from a worker thread. All provider I/O remains on
+            # the owning event loop; creating a fresh loop here would leak async clients.
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
@@ -165,30 +194,66 @@ def bounded_llm(settings, step, payload, client, observer=None):
             return False
 
         def get_context_window_size(self):
-            return 32000
+            return resolved.context_window_tokens
 
-    provider_messages = messages(step, payload)
-    return BoundedOpenAI()
+    return BoundedProviderLLM()
 
 
 class CrewAIAdapter:
-    def __init__(self, settings, client=None, observer=None):
+    def __init__(self, settings, client=None, observer=None, transports=None):
         self.settings, self.client = settings, client
         self.observer = observer or NoOpObserver()
-
-    async def execute(self, step, payload):
-        from openai import AsyncOpenAI
-
-        if not self.client and not self.settings.openai_api_key.get_secret_value():
-            raise InvalidOutput("PROVIDER_NOT_CONFIGURED")
-        client = self.client or AsyncOpenAI(
-            api_key=self.settings.openai_api_key.get_secret_value(),
-            timeout=self.settings.llm_request_timeout_seconds,
-            max_retries=0,
+        self.transports = (
+            dict(transports)
+            if transports is not None
+            else create_transports(settings, openai_client=client)
         )
-        llm = bounded_llm(self.settings, step, payload, client, self.observer)
-        # CrewAI can print raw responses on error even with verbose=False. Worker is solo;
-        # suppress these streams, and emit our own sanitized structured events in the runner.
+        self._injected_providers = {
+            provider
+            for provider, transport in self.transports.items()
+            if not isinstance(transport, LoopOwnedTransport) or not transport._owns_client
+        }
+
+    def validate_profile(self, profile):
+        if profile.provider not in self.transports:
+            raise InvalidOutput("EXECUTION_CONFIG_UNAVAILABLE")
+        validate_profile_runtime(
+            profile,
+            self.settings,
+            require_credentials=profile.provider not in self._injected_providers,
+        )
+        endpoint = getattr(self.transports[profile.provider], "base_url", None)
+        if endpoint is not None and digest(endpoint) != profile.endpoint_fingerprint:
+            raise InvalidOutput("EXECUTION_CONFIG_UNAVAILABLE")
+
+    async def model_identity(self, profile):
+        self.validate_profile(profile)
+        lookup = getattr(self.transports[profile.provider], "model_identity", None)
+        return await lookup(profile) if lookup else None
+
+    async def execute(self, step, payload, profile=None):
+        resolved = profile or legacy_profile(self.settings, step)
+        if profile is None and "openai" not in self._injected_providers:
+            if not self.settings.openai_api_key.get_secret_value().strip():
+                raise InvalidOutput("PROVIDER_NOT_CONFIGURED")
+        self.validate_profile(resolved)
+        if profile is not None:
+            schema = provider_wire_schema(step, payload, resolved.provider)
+            if (
+                estimate_input_tokens(messages(step, payload), schema) + resolved.max_output_tokens
+                > resolved.context_window_tokens
+            ):
+                raise InvalidOutput("CONTEXT_LIMIT_EXCEEDED")
+        llm = bounded_llm(
+            self.settings,
+            step,
+            payload,
+            observer=self.observer,
+            profile=profile,
+            transport=self.transports[resolved.provider],
+        )
+        # CrewAI can print raw responses even with verbose=False. The solo worker emits
+        # sanitized events itself; its stdout/stderr must never expose provider bodies.
         try:
             with (
                 contextlib.redirect_stdout(io.StringIO()),
@@ -200,11 +265,18 @@ class CrewAIAdapter:
             if llm.failure:
                 raise llm.failure from None
             raise InvalidOutput("CREW_OUTPUT_REJECTED") from None
-        finally:
-            if self.client is None:
-                await client.close()
         if llm.failure:
             raise llm.failure
         if llm.result is None:
             raise InvalidOutput("NO_STRUCTURED_RESULT")
         return llm.result
+
+    async def aclose(self):
+        seen = set()
+        for transport in self.transports.values():
+            if id(transport) in seen:
+                continue
+            seen.add(id(transport))
+            close = getattr(transport, "aclose", None)
+            if close is not None:
+                await close()

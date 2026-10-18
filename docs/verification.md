@@ -1,5 +1,39 @@
 # Plan review and verification
 
+## F002 per-step LLM providers — 2026-10-18
+
+Operations: [LLM routing](llm-routing.vi.md). OpenAI remains the default; Claude
+(Anthropic Messages) and local/self-managed Ollama are optional per-step routes.
+No real provider calls or model downloads were performed.
+
+| Area | Automated coverage |
+|---|---|
+| Typed routing/legacy env | `test_llm_configuration`: routes, providers, finite limits/rates, credentials, endpoint/version/lease identity |
+| Provider protocols | `test_llm_transports`, `test_crewai`: SDK/native JSON schema, terminal flags, usage, errors, exactly one generation, loop ownership |
+| Snapshot/audit/API | `test_execution_config_repository`: atomic create/idempotency/reservation, sanitized metadata, unknown history, digest fencing |
+| Workflow/resume/costs | `test_llm_routing_workflow`, `test_llm_routing_safety`: mixed/all-local routes, legacy hashes, retry/digest drift, context, missing keys, rejected usage, timeout reservation, privacy |
+| Actual Crew integration | `test_provider_routing_crew`: API -> actual Crew -> OpenAI SDK/native Ollama/Claude HTTP mocks -> SQLite/PostgreSQL, with/without Tavily |
+| Additive migration | `test_llm_migration`: historical SQLite rows, foreign keys, downgrade/upgrade and Alembic drift; PostgreSQL legacy replay audited separately |
+
+Baseline: **177 passed, 70 skipped** (optional PostgreSQL/Redis disabled).
+Final full suite, with real PostgreSQL **16.15** and Redis **7.4.11** in isolated
+temporary containers, `TEST_POSTGRES_URL`, `RUN_REDIS_E2E=1`, `TEST_REDIS_URL` enabled:
+
+```text
+python -m pytest -q --disable-warnings --show-capture=no --tb=short --basetemp data/pytest-f002-final
+431 passed, 1244 warnings in 127.57s (0:02:07); 0 skipped
+```
+
+SQLite and PostgreSQL migration downgrade/upgrade/check and legacy
+pending/partial/completed replay passed, requiring 3/2/0 mocked generations after
+route configuration changed. No application database/queue was used. Migration
+`26a1018_llm_execution_config` must run before updated API/workers start.
+
+`ruff check .`, `ruff format --check .` (114 files), `git diff --check`,
+`uv --cache-dir .uv-cache lock --check --offline`, and `docker compose config --quiet`
+passed. Provider/model/hardware quality and real-account access remain unverified;
+an opt-in smoke/evaluation is still needed when the operator is ready.
+
 ## F001 Tavily collection — 2026-10-18
 
 Implementation and operations: [Tavily guide](tavily-collection.vi.md).

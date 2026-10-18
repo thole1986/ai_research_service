@@ -8,6 +8,7 @@ services:
       DATABASE_URL: ${CONTAINER_DATABASE_URL:-}
       POSTGRES_HOST: ${CONTAINER_POSTGRES_HOST:-host.docker.internal}
       REDIS_URL: ${CONTAINER_REDIS_URL:-redis://host.docker.internal:6379/0}
+      OLLAMA_BASE_URL: ${CONTAINER_OLLAMA_BASE_URL:-${OLLAMA_BASE_URL:-http://localhost:11434}}
       CREWAI_STORAGE_DIR: /app/data/crewai
       CREWAI_TELEMETRY_DISABLED: 'true'
       OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}

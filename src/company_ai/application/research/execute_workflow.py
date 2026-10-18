@@ -9,9 +9,12 @@ from company_ai.application.research.ports import (
 )
 from company_ai.application.research.prompts import (
     SYSTEM,
+    WIRE_SCHEMA_VERSION,
     instructions,
+    messages,
     prompt_versions,
     provider_schema,
+    provider_wire_schema,
     reserve_cost,
 )
 from company_ai.application.research.step_executor import inject_failure, keep_lease
@@ -24,6 +27,13 @@ from company_ai.domain.research.contracts import (
     output_error_category,
 )
 from company_ai.domain.research.hashing import digest
+from company_ai.domain.research.llm import (
+    estimate_input_tokens,
+    legacy_profile,
+    price_usage,
+    reserve_profile_cost,
+    validate_execution_config,
+)
 from company_ai.domain.research.outputs import schema_for
 from company_ai.domain.research.policies import validate_evidence
 from company_ai.domain.research.scoring import score
@@ -59,7 +69,7 @@ def step_payload(name, job, outputs, settings=None):
     return payload
 
 
-def input_hash(name, payload, settings):
+def input_hash(name, payload, settings, profile=None):
     if name == "COLLECT":
         return digest(
             {
@@ -77,6 +87,17 @@ def input_hash(name, payload, settings):
         "schema": provider_schema(name, payload),
     }
     if name != "SCORE":
+        if profile is not None:
+            identity.update(
+                domain_schema=schema_for(name, payload).model_json_schema(),
+                wire_schema=provider_wire_schema(name, payload, profile.provider),
+                wire_schema_version=WIRE_SCHEMA_VERSION,
+                prompt_version=prompt_version,
+                prompt=SYSTEM + instructions(name, payload),
+                execution_profile=profile.model_dump(mode="json"),
+                config_fingerprint=profile.config_fingerprint,
+            )
+            return digest(identity)
         identity.update(
             model=settings.openai_model,
             temperature=settings.llm_temperature,
@@ -140,11 +161,27 @@ async def _run_workflow(job_id, repo, adapter, settings, observer, workflow, col
             status_message="JOB_NOT_EXECUTABLE",
         )
         return
+    config = None
+    if job.execution_config is not None:
+        try:
+            config = validate_execution_config(job.execution_config, settings)
+        except (ValueError, InvalidOutput):
+            await repo.review_job(job_id, "EXECUTION_CONFIG_UNAVAILABLE")
+            _record_outcome(
+                workflow,
+                job_id,
+                "NEEDS_REVIEW",
+                {},
+                error_code="EXECUTION_CONFIG_UNAVAILABLE",
+                level="ERROR",
+            )
+            return
     outputs = {}
     for step in steps:
         name = step.step_name
         payload = step_payload(name, job, outputs, settings)
-        hashed = input_hash(name, payload, settings)
+        profile = config.steps[name] if config and name not in ("COLLECT", "SCORE") else None
+        hashed = input_hash(name, payload, settings, profile)
         prompt_version, schema_version = prompt_versions(payload)
         metadata = {
             "job_id": job_id,
@@ -167,6 +204,15 @@ async def _run_workflow(job_id, repo, adapter, settings, observer, workflow, col
             if name == "SCORE"
             else ({"prompt_version": prompt_version, "model": settings.openai_model})
         )
+        if profile is not None:
+            metadata.update(
+                provider=profile.provider,
+                model=profile.model,
+                profile_id=profile.profile_id,
+                config_fingerprint=profile.config_fingerprint,
+                pricing_kind=profile.pricing.kind,
+                adapter_version=profile.adapter_version,
+            )
         if step.status == "COMPLETED":
             if step.input_hash != hashed or step.output_hash != digest(step.output_json):
                 await repo.review_job(job_id, "CHECKPOINT_VERSION_MISMATCH")
@@ -195,9 +241,12 @@ async def _run_workflow(job_id, repo, adapter, settings, observer, workflow, col
             _record_outcome(workflow, job_id, "STEP_NOT_CLAIMED", outputs)
             return
         fields = {"job_id": job_id, "step_name": name, "attempt_id": claim.attempt_id}
+        if profile is not None:
+            fields.update(provider=profile.provider, model=profile.model)
         metadata["attempt_id"] = claim.attempt_id
         log_event("STEP_CLAIMED", **fields)
         started = time.perf_counter()
+        result = None
         inject_failure(settings, name, "claim")
         try:
             with observer.span(name, metadata=metadata, input=payload) as observation:
@@ -218,14 +267,66 @@ async def _run_workflow(job_id, repo, adapter, settings, observer, workflow, col
                     elif name == "SCORE":
                         result = AIResult(score(outputs["RESEARCH"], outputs["CLASSIFY"]))
                     else:
-                        reserve = reserve_cost(name, payload, settings)
-                        if not await repo.request_started(claim, reserve):
+                        execution_metadata = None
+                        if profile is not None:
+                            wire_schema = provider_wire_schema(name, payload, profile.provider)
+                            trusted_messages = messages(name, payload)
+                            if (
+                                estimate_input_tokens(trusted_messages, wire_schema)
+                                + profile.max_output_tokens
+                                > profile.context_window_tokens
+                            ):
+                                raise InvalidOutput("CONTEXT_LIMIT_EXCEEDED")
+                            validate_profile = getattr(adapter, "validate_profile", None)
+                            if validate_profile is not None:
+                                validate_profile(profile)
+                            identity_lookup = getattr(adapter, "model_identity", None)
+                            if profile.provider == "ollama":
+                                model_digest = (
+                                    await identity_lookup(profile) if identity_lookup else None
+                                )
+                                if not await repo.pin_model_identity(
+                                    claim,
+                                    digest(
+                                        {
+                                            "provider": profile.provider,
+                                            "model": profile.model,
+                                            "endpoint_fingerprint": profile.endpoint_fingerprint,
+                                        }
+                                    ),
+                                    model_digest,
+                                ):
+                                    raise InvalidOutput("MODEL_IDENTITY_CHANGED")
+                            reserve = reserve_profile_cost(profile, trusted_messages, wire_schema)
+                            execution_metadata = {
+                                key: metadata[key]
+                                for key in (
+                                    "provider",
+                                    "model",
+                                    "profile_id",
+                                    "config_fingerprint",
+                                    "pricing_kind",
+                                    "adapter_version",
+                                )
+                            }
+                        else:
+                            reserve = reserve_cost(name, payload, settings)
+                        admitted = (
+                            await repo.request_started(claim, reserve, execution_metadata)
+                            if execution_metadata is not None
+                            else await repo.request_started(claim, reserve)
+                        )
+                        if not admitted:
                             observation.update(status_message="LLM_REQUEST_NOT_STARTED")
                             _record_outcome(workflow, job_id, "LLM_REQUEST_NOT_STARTED", outputs)
                             return
                         log_event("LLM_REQUEST_STARTED", **fields)
                         inject_failure(settings, name, "request_started")
-                        result = await adapter.execute(name, payload)
+                        result = (
+                            await adapter.execute(name, payload, profile)
+                            if profile is not None
+                            else await adapter.execute(name, payload)
+                        )
                         inject_failure(settings, name, "response")
                     try:
                         validated = (
@@ -247,10 +348,13 @@ async def _run_workflow(job_id, repo, adapter, settings, observer, workflow, col
                         and result.tokens_input is not None
                         and result.tokens_output is not None
                     ):
-                        cost = (
-                            result.tokens_input * settings.input_usd_per_million
-                            + result.tokens_output * settings.output_usd_per_million
-                        ) / 1000000
+                        cost = price_usage(
+                            profile or legacy_profile(settings, name),
+                            result.tokens_input,
+                            result.tokens_output,
+                        )
+                    elif profile is not None and profile.pricing.kind == "local_unmetered":
+                        cost = price_usage(profile, result.tokens_input, result.tokens_output)
                     if not await repo.complete_step_with_fencing(claim, validated, result, cost):
                         observation.update(
                             output=validated, status_message="STALE_RESULT_DISCARDED"
@@ -292,6 +396,14 @@ async def _run_workflow(job_id, repo, adapter, settings, observer, workflow, col
             log_event("SAFE_RETRY", **fields, error_category="PROVIDER_REJECTED")
             return
         except (ValidationError, InvalidOutput) as exc:
+            rejected_result = getattr(exc, "result", None) or result
+            if name not in ("SCORE", "COLLECT") and isinstance(rejected_result, AIResult):
+                rejected_cost = price_usage(
+                    profile or legacy_profile(settings, name),
+                    rejected_result.tokens_input,
+                    rejected_result.tokens_output,
+                )
+                await repo.record_llm_usage(claim, rejected_result, rejected_cost)
             category = (
                 ("COLLECT_INVALID_RESPONSE" if name == "COLLECT" else "INVALID_STRUCTURED_OUTPUT")
                 if isinstance(exc, ValidationError)

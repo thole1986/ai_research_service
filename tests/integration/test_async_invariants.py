@@ -20,11 +20,11 @@ async def test_session_is_closed_during_llm_and_event_loop_remains_responsive(re
     done = asyncio.Event()
 
     class SlowAdapter(CountingAdapter):
-        async def execute(self, step, data):
+        async def execute(self, step, data, profile=None):
             # No operation/session/transaction survives while waiting for the provider.
             assert repo.db.engine.pool.checkedout() == 0
             await asyncio.sleep(0.05)
-            return await super().execute(step, data)
+            return await super().execute(step, data, profile)
 
     async def ticker():
         while not done.is_set():

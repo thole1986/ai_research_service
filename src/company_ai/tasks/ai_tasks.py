@@ -13,6 +13,7 @@ def run_job(job_id: str):
     async def execute(repo):
         observer = get_worker_observer()
         collector = None
+        adapter = None
         try:
             job, _ = await repo.get_job(job_id)
             if job and job.input_json.get("collection_mode", "manual") == "tavily":
@@ -23,8 +24,12 @@ def run_job(job_id: str):
             )
         finally:
             try:
-                if collector is not None:
-                    await collector.aclose()
+                try:
+                    if adapter is not None:
+                        await adapter.aclose()
+                finally:
+                    if collector is not None:
+                        await collector.aclose()
             finally:
                 await asyncio.to_thread(observer.flush)
 

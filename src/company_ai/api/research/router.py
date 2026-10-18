@@ -1,11 +1,13 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from pydantic import ValidationError
 
 from company_ai.api.dependencies import AppSettings, require_admin
 from company_ai.api.research.dependencies import Jobs
 from company_ai.api.research.schemas import EventView, JobAccepted, JobInput, JobView, RetryInput
 from company_ai.domain.research.errors import Conflict
+from company_ai.domain.research.llm import ExecutionConfig
 
 router = APIRouter(prefix="/api/v1/research/jobs", tags=["research"])
 
@@ -36,6 +38,23 @@ async def create_job(
 @router.get("/{job_id}", response_model=JobView)
 async def get_job(job_id: str, service: Jobs):
     job, steps = await service.get(job_id)
+    execution_metadata = None
+    if job.execution_config is not None:
+        try:
+            profiles = ExecutionConfig.model_validate(job.execution_config).steps
+        except ValidationError:
+            # A worker with an unavailable/future snapshot must remain inspectable.
+            profiles = {}
+        execution_metadata = {
+            name: {
+                "provider": profile.provider,
+                "model": profile.model,
+                "profile_id": profile.profile_id,
+                "config_fingerprint": profile.config_fingerprint,
+                "pricing_kind": profile.pricing.kind,
+            }
+            for name, profile in profiles.items()
+        }
     result = job.result_json
     if result is None and any(step.step_name == "COLLECT" for step in steps):
         result = {
@@ -58,10 +77,12 @@ async def get_job(job_id: str, service: Jobs):
                 "completed_at": s.completed_at,
                 "updated_at": s.updated_at,
                 "output": s.output_json,
+                "execution_metadata": (execution_metadata or {}).get(s.step_name),
             }
             for s in steps
         ],
         "result": result,
+        "execution_metadata": execution_metadata,
     }
 
 

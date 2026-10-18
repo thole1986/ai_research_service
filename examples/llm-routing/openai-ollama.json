@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "profiles": {
+    "openai_default": {
+      "provider": "openai",
+      "model": "gpt-4.1-mini",
+      "temperature": 0,
+      "max_output_tokens": 500,
+      "timeout_seconds": 90,
+      "context_window_tokens": 32000,
+      "pricing": {
+        "kind": "estimated_token_rates",
+        "input_usd_per_million": 0.4,
+        "output_usd_per_million": 1.6
+      }
+    },
+    "ollama_report": {
+      "provider": "ollama",
+      "model": "<installed-model-tag>",
+      "temperature": 0,
+      "max_output_tokens": 1000,
+      "timeout_seconds": 180,
+      "context_window_tokens": 32000,
+      "pricing": {"kind": "local_unmetered"}
+    }
+  },
+  "steps": {
+    "RESEARCH": "openai_default",
+    "CLASSIFY": "openai_default",
+    "REPORT": "ollama_report"
+  }
+}
