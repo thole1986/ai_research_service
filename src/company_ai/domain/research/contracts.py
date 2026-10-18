@@ -2,6 +2,21 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 STEPS = ("RESEARCH", "CLASSIFY", "SCORE", "REPORT")
+ALL_STEPS = ("COLLECT", *STEPS)
+LEGACY_WORKFLOW_VERSION = "manual-v1"
+COLLECTION_WORKFLOW_VERSION = "tavily-v1"
+
+
+def steps_for_mode(mode: str = "manual") -> tuple[str, ...]:
+    if mode in ("tavily", COLLECTION_WORKFLOW_VERSION):
+        return ALL_STEPS
+    if mode in ("manual", LEGACY_WORKFLOW_VERSION):
+        return STEPS
+    raise ValueError("Unsupported collection mode or workflow version")
+
+
+def step_order(name: str) -> int:
+    return ALL_STEPS.index(name)
 
 
 @dataclass(frozen=True)
@@ -54,6 +69,15 @@ def output_error_category(exc):
         "PROVIDER_PERMISSION_DENIED",
         "PROVIDER_REQUEST_INVALID",
         "PROVIDER_MODEL_NOT_FOUND",
+        "COLLECT_NOT_CONFIGURED",
+        "COLLECT_AUTHENTICATION_FAILED",
+        "COLLECT_PERMISSION_DENIED",
+        "COLLECT_REQUEST_INVALID",
+        "COLLECT_USAGE_LIMIT_REACHED",
+        "COLLECT_INVALID_RESPONSE",
+        "COLLECT_NO_USABLE_SOURCES",
+        "UNSUPPORTED_REPORT_SOURCE",
+        "MISSING_REPORT_LIMITATIONS",
     }
     if isinstance(exc, InvalidOutput) and str(exc) in categories:
         return str(exc)

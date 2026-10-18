@@ -4,6 +4,8 @@ Tài liệu này giải thích **hành vi của mã nguồn hiện tại**, từ
 
 Đọc tài liệu này không cần khởi động hệ thống. Các JSON, ID và timeline minh họa không phải kết quả gọi OpenAI thực tế.
 
+Mặc định là `collection_mode="manual"` với bốn bước phân tích. `collection_mode="tavily"` thêm COLLECT trước RESEARCH, lưu text/URL nguồn rồi dùng checkpoint đó cho phân tích. Hướng dẫn cấu hình, demo và bảng lỗi riêng nằm tại [thu thập nguồn Tavily](tavily-collection.vi.md).
+
 ## Mục lục
 
 1. [Bản đồ service và trách nhiệm](#services)
@@ -35,6 +37,7 @@ flowchart LR
     Runner --> DB
     Runner --> Crew[CrewAI: một Crew mỗi bước AI]
     Crew --> OpenAI[OpenAI API]
+    Runner -->|COLLECT khi bật Tavily mode| Tavily[Tavily Search API]
     Beat[Celery Beat] -->|lập lịch task| Redis
     Redis -->|queue maintenance| Maintenance[Maintenance worker]
     Maintenance --> DB
@@ -52,6 +55,7 @@ flowchart LR
 | Workflow runner | Quyết định bước tiếp theo, kiểm tra checkpoint/hash, claim, gọi adapter, lưu kết quả và phân loại lỗi | Không xem trạng thái Celery là trạng thái nghiệp vụ |
 | CrewAI adapter | Tạo một Crew/Agent/Task cho từng bước AI, gọi OpenAI và đọc output có cấu trúc | Không có quyền tự thao tác DB, shell, crawler hoặc điều phối recovery |
 | OpenAI | Sinh kết quả theo prompt/schema từ dữ liệu được gửi | Không bảo đảm dữ liệu doanh nghiệp ngoài đời là chính xác |
+| Tavily collector | Tối đa một Search request mỗi attempt COLLECT; chuẩn hóa và lưu snippet/URL | Không dùng LLM, không trực tiếp fetch các URL kết quả hoặc chứng nhận danh tính công ty |
 | `beat` | Theo lịch, gửi task bảo trì vào queue `maintenance` | Không tự quét DB hay trực tiếp khôi phục job |
 | `maintenance-worker` | Thực thi stale scan, enqueue job chờ và dọn audit event cũ | Không tự gọi lại LLM có kết quả không xác định |
 | Database | Lưu job, bước, attempt, sự kiện và kết quả; thực thi unique constraint, transaction và fencing | Không tự gọi OpenAI hay tự publish message |
@@ -60,11 +64,12 @@ flowchart LR
 
 ### Một job không tương đương một message cho mỗi bước
 
-Hiện tại, một message chứa `job_id` gọi **một task chạy vòng lặp cả bốn bước**:
+Một message chứa `job_id` gọi **một task chạy vòng lặp các bước thực tế của job**, bốn bước manual hoặc năm bước Tavily:
 
 ```text
 run_job(job_id)
   └─ run_workflow(...)
+       ├─ COLLECT  → checkpoint (chỉ tavily)
        ├─ RESEARCH → checkpoint
        ├─ CLASSIFY → checkpoint
        ├─ SCORE    → checkpoint
@@ -93,6 +98,15 @@ Hai driver được hỗ trợ là `sqlite+aiosqlite` và `postgresql+asyncpg`. 
 Mặc định SQLite dùng `./data/ai_research.db`. Trong container, working directory `/app` làm đường dẫn này trở thành `/app/data/ai_research.db`, nằm trong volume `app-data` dùng chung giữa các service ứng dụng.
 
 Chọn PostgreSQL nghĩa là các service kết nối cùng PostgreSQL đã cấu hình; không tự di chuyển job từ file SQLite sang PostgreSQL.
+
+Chạy `alembic upgrade head` trước khi khởi động API/worker cập nhật; revision `26a1018_tavily_collection` thêm workflow version và audit collection. Job cũ vẫn là `manual-v1`, không được tự thêm COLLECT. Tavily key chỉ cần khi chọn mode thu thập; các cấu hình mới:
+
+| Biến | Mặc định | Ý nghĩa |
+|---|---|---|
+| `TAVILY_API_KEY` | Rỗng | Key dùng riêng cho Tavily mode |
+| `TAVILY_REQUEST_TIMEOUT_SECONDS` | 30 | Timeout dương; lease TTL phải lớn hơn trên 10 giây |
+| `TAVILY_MAX_RESULTS` | 5 | Giới hạn từ 1 đến 5 nguồn web |
+| `COLLECT_MAX_ATTEMPTS` | 2 | Trần collection, bao gồm retry thủ công, không vượt `MAX_STEP_ATTEMPTS` |
 
 ### 2.2. Thứ tự trong Compose
 
@@ -132,7 +146,7 @@ Content-Type: application/json
 }
 ```
 
-`icp` là chân dung khách hàng lý tưởng dùng để đối chiếu, không phải nguồn chứng cứ về doanh nghiệp. `website_text` là nội dung người dùng tự cung cấp. `website` chỉ là URL tham chiếu; không có crawler tự mở URL đó.
+Ví dụ trên dùng manual mode mặc định. Để thu thập, thêm `"collection_mode":"tavily"`; có thể bỏ `company_description`, `website_text` và `website`. `icp` dùng để đối chiếu, không là chứng cứ và không được đưa vào query. `website_text` là text operator; URL không tự chứng minh đó là nguồn của text này. Tavily mode dùng hostname để định hướng tìm kiếm, còn backend không có crawler tự mở URL.
 
 ### 3.2. Các lớp kiểm tra
 
@@ -144,13 +158,14 @@ Content-Type: application/json
 | Route | Tổng độ dài các giá trị sau chuẩn hóa không vượt `MAX_INPUT_CHARS`, mặc định 6000 ký tự | `422 INPUT_TOO_LONG` |
 | Repository | Kiểm tra cùng key có cùng request hash không | `409 IDEMPOTENCY_KEY_CONFLICT` nếu khác |
 
-Giới hạn trường: tên doanh nghiệp 200 ký tự, mô tả và website text mỗi trường 20.000, ICP 2.000. Đây là giới hạn từng trường; vẫn phải qua giới hạn tổng 6000 mặc định. Tên, mô tả và ICP được trim khoảng trắng và phải còn ít nhất một ký tự.
+Giới hạn trường: tên doanh nghiệp 200 ký tự, mô tả và website text mỗi trường 20.000, ICP 2.000. Đây là giới hạn từng trường; vẫn phải qua giới hạn tổng 6000 mặc định. Tên và ICP được trim và phải còn ít nhất một ký tự; manual yêu cầu thêm mô tả không rỗng. Tavily cho phép mô tả thiếu/rỗng. URL chứa credentials bị từ chối.
 
 API tự sinh UUID cho `X-Request-ID` và trả ở response. Hiện tại không dùng giá trị `X-Request-ID` do client gửi để nối trace sang worker; ID xuyên suốt nghiệp vụ là `job_id`.
 
 ### 3.3. Chuẩn hóa và idempotency
 
 Route dùng `body.model_dump(mode="json")`. Vì vậy, URL được chuyển về dạng JSON của Pydantic và các giá trị mặc định được điền: chẳng hạn `website_text` bỏ trống được chuẩn hóa thành chuỗi rỗng.
+Khi đối chiếu key cũ, repository chuẩn hóa cả payload đã lưu và payload mới với cùng defaults, gồm `collection_mode="manual"`; thiếu trường default ở bản ghi legacy không tự gây 409. Input đã lưu không bị sửa lại.
 
 Request hash được tính bằng SHA-256 của JSON có key được sắp xếp, bỏ khoảng trắng định dạng và giữ Unicode. Đổi thứ tự key JSON không tạo request hash mới. Đây là so sánh dữ liệu đã chuẩn hóa, không phải so sánh ý nghĩa câu chữ.
 
@@ -174,7 +189,7 @@ Trong một transaction, repository:
 
 1. Thêm `ai_jobs`: UUID, key unique, request hash, input JSON, trạng thái `PENDING`, timestamp và chi phí ban đầu.
 2. Flush để kiểm tra constraint và lấy các giá trị mặc định.
-3. Thêm bốn hàng `ai_steps`, đều `PENDING`, unique theo `(job_id, step_name)`.
+3. Lưu workflow version và thêm các hàng `ai_steps` theo mode: bốn cho `manual-v1`, năm cho `tavily-v1` có COLLECT đầu tiên; đều `PENDING`, unique theo `(job_id, step_name)`.
 4. Thêm event `JOB_CREATED`.
 5. Commit toàn bộ trước khi publish message.
 
@@ -256,7 +271,7 @@ Không tái sử dụng một async engine toàn cục qua nhiều event loop ho
 
 ### 5.2. Đọc DB và quyết định có được chạy không
 
-Runner đọc job và bốn step theo thứ tự `RESEARCH → CLASSIFY → SCORE → REPORT`.
+Runner đọc job và các step đã lưu theo thứ tự: `RESEARCH → CLASSIFY → SCORE → REPORT` cho manual; thêm COLLECT đầu tiên cho Tavily. Predecessor, completion và retry dựa trên các bước thực tế, nên job cũ không bị yêu cầu có COLLECT.
 
 | Trạng thái đầu vào | Hành động |
 |---|---|
@@ -274,6 +289,7 @@ Job đã `COMPLETED` được bỏ qua ngay; runner không kiểm tra lại hash
 Trước khi claim hoặc tái sử dụng checkpoint, runner dựng input của bước và tính hash.
 
 Với bước AI, hash chứa tên bước, payload, schema/version, prompt/version, model, temperature, output token limit, agent iteration limit, request timeout và adapter version. Với SCORE, hash chứa payload, schema/version và rules version.
+COLLECT hash chứa tên công ty, website chuẩn hóa, max results, query policy/schema version và các giới hạn text; không chứa key, thời điểm runtime hoặc model LLM. RESEARCH Tavily hash chứa nguồn hiệu lực và metadata collection liên quan. Manual giữ nguyên đường schema/prompt/hash legacy.
 
 Payload các bước sau chứa dữ liệu checkpoint trước đó cần thiết cho bước đó. Vì runner kiểm tra tuần tự, checkpoint phía trước không hợp lệ sẽ chặn việc tiếp tục phía sau.
 
@@ -330,16 +346,23 @@ Runner ước tính chi phí rồi gọi `request_started()` trong một transac
 
 <a id="steps"></a>
 
-## 6. Dữ liệu đi qua bốn bước như thế nào?
+## 6. Dữ liệu đi qua các bước như thế nào?
 
 | Bước | Input thực tế do runner dựng | Output checkpoint |
 |---|---|---|
+| COLLECT (Tavily) | Tên công ty, website chuẩn hóa và cấu hình policy; không có ICP | Query, thời điểm UTC, text/URL/source ID, warnings và usage/credits nếu biết |
 | RESEARCH | `company_name`, `company_description`, `website_text` | Tên, ngành nghề, sản phẩm, nhóm khách hàng, `evidence`, `limitations` |
 | CLASSIFY | Research checkpoint + `icp` | `icp_match`, `matching_signals`, `missing_signals`, `reasoning` |
 | SCORE | Research + classification checkpoint | Điểm, từng quy tắc được cộng điểm, xếp hạng, ghi chú nguồn |
 | REPORT | Input job + toàn bộ checkpoint trước | Tóm tắt, điểm mạnh, rủi ro, câu hỏi tiếp theo, ghi chú nguồn |
 
-RESEARCH không nhận ICP làm nguồn suy diễn và không nhận URL website trong payload bước này. REPORT nhận input job có URL nhưng vẫn không có công cụ duyệt web.
+RESEARCH manual nhận text operator; Tavily mode bổ sung `sources` và collection metadata. RESEARCH không nhận ICP làm evidence. REPORT nhận input/checkpoint và danh sách nguồn ở Tavily mode; mọi bước LLM vẫn không có công cụ duyệt web.
+
+### COLLECT trước RESEARCH, chỉ trong Tavily mode
+
+Service gọi Tavily Search basic tối đa một lần mỗi attempt, tối đa 5 kết quả; không dùng generated answer làm evidence. Collector bỏ URL không hợp lệ/không HTTP(S), trùng hoặc không có nội dung; ưu tiên hostname chính thức bằng parser, kèm warning khi tên/domain chưa rõ. Text giới hạn 4.000 ký tự mỗi nguồn và 20.000 tổng nguồn web, được lưu chính xác sau chuẩn hóa/cắt giới hạn. Đây là snippet có thể thiếu/cũ, không xác nhận thông tin đúng.
+
+Text operator được ghép thành nguồn hiệu lực riêng với ID `operator:company_description` hoặc `operator:website_text`, URL null; input job không bị ghi đè. Không có web result nhưng có text operator thì lưu checkpoint rỗng kèm warning và tiếp tục; không có cả hai thì `COLLECT_NO_USABLE_SOURCES`, không gọi LLM. Xem [bảng lỗi và audit Tavily](tavily-collection.vi.md).
 
 ### 6.1. RESEARCH
 
@@ -350,6 +373,7 @@ company_description + ký tự xuống dòng + website_text
 ```
 
 Không tìm thấy dẫn chứng → `InvalidOutput`, dừng để kiểm tra. Danh sách evidence có thể rỗng theo schema; code không biến sự thiếu dữ liệu thành bằng chứng tích cực.
+Với Tavily mode, giữ `evidence: list[str]` để scoring tương thích và thêm `evidence_sources: [{quote, source_id}]`. Mọi quote phải được mapping đầy đủ và là substring nguyên văn trong đúng content của nguồn tham chiếu; ID giả bị từ chối. Nguồn web là dữ liệu không đáng tin cậy trong prompt, không trở thành instruction.
 
 ### 6.2. CLASSIFY
 
@@ -380,6 +404,7 @@ Quy tắc regex hiện tại còn đơn giản: không tự hiểu phủ định
 ### 6.4. REPORT
 
 Crew tổng hợp các checkpoint thành báo cáo có cấu trúc. Prompt yêu cầu giữ hạn chế, missing signal và mô tả nguồn do người vận hành cung cấp. Code kiểm tra schema/độ dài; không có một bộ kiểm chứng thực tế độc lập cho từng câu trong báo cáo.
+Tavily mode thêm `sources: [{source_id, url}]` và `limitations` không rỗng. Validator từ chối ID lạ, URL khác URL đã lưu, gán URL cho text operator hoặc bỏ citation của evidence Research. Prompt yêu cầu nêu snippet không đầy đủ, cảnh báo thu thập và chưa xác minh độc lập.
 
 ### 6.5. Bên trong một Crew AI
 
@@ -428,9 +453,9 @@ Nếu update được đúng một hàng, trong cùng transaction:
 
 1. Step → `COMPLETED`, lưu `output_json`, `output_hash`, thời gian hoàn tất; xóa token/lease đang giữ.
 2. Attempt → `SUCCEEDED`, lưu thời gian kết thúc, token usage và provider request ID nếu có.
-3. Điều chỉnh chi phí giữ chỗ bằng chi phí ước tính theo usage khi có đủ token input/output.
+3. Với LLM, điều chỉnh chi phí giữ chỗ theo usage khi có đủ token input/output; COLLECT lưu usage/credits riêng khi biết.
 4. Thêm `STEP_CHECKPOINTED`.
-5. Nếu cả bốn bước đều hoàn tất: job → `COMPLETED`, lưu kết quả tổng hợp, timestamp và event `JOB_COMPLETED`.
+5. Nếu mọi bước thực tế của job đều hoàn tất: job → `COMPLETED`, lưu kết quả tổng hợp, timestamp và event `JOB_COMPLETED`.
 6. Commit.
 
 Nếu update không được hàng nào, runner ghi `STALE_RESULT_DISCARDED` rồi thoát. Không ghi đè checkpoint hoặc tự nhận lại quyền sở hữu.
@@ -453,13 +478,13 @@ sequenceDiagram
     participant W as AI worker / Runner
     participant L as CrewAI / OpenAI
     C->>A: POST input + Idempotency-Key
-    A->>D: Transaction tạo job, 4 step, JOB_CREATED
+    A->>D: Transaction tạo job, 4/5 step theo mode, JOB_CREATED
     D-->>A: Commit
     A->>R: run_job(job_id), queue ai
     A-->>C: 202 + job_id + status_url
     R->>W: Giao task
     W->>D: Đọc trạng thái và checkpoint
-    loop RESEARCH, CLASSIFY, SCORE, REPORT
+    loop COLLECT nếu bật, RESEARCH, CLASSIFY, SCORE, REPORT
         W->>D: Atomic claim + tạo attempt, commit
         alt Bước AI
             W->>D: Giữ chỗ ngân sách + REQUEST_STARTED, commit
@@ -467,6 +492,8 @@ sequenceDiagram
             L-->>W: Output + usage nếu có
         else SCORE
             Note over W: Tính điểm bằng Python
+        else COLLECT
+            Note over W: Ghi collection intent rồi gọi Tavily ngoài DB transaction
         end
         W->>D: Fenced checkpoint + audit + trạng thái job, commit
     end
@@ -489,8 +516,8 @@ Client gọi `GET /api/v1/research/jobs/{job_id}` và đọc:
 - `status` cấp job; thời gian tạo/cập nhật/hoàn tất.
 - `steps` theo thứ tự pipeline, gồm status, attempt count, timestamp và output đã checkpoint.
 - `error` chứa mã lỗi và thông báo làm sạch khi có lỗi.
-- `estimated_cost_usd`.
-- `result` tổng hợp khi hoàn tất: `research`, `classify`, `score`, `report`.
+- `estimated_cost_usd` chỉ là LLM USD ước tính.
+- `result` tổng hợp khi hoàn tất: `research`, `classify`, `score`, `report`; Tavily có thêm `collect` và trả checkpoint đã có trong khi job chưa hoàn tất.
 
 Các HTTP GET đọc DB, không làm job chạy lại. Job chưa biết trả `404 JOB_NOT_FOUND`. Có thể poll vài giây một lần; đây là lựa chọn client, chưa có WebSocket, webhook hay thông báo đẩy.
 
@@ -522,7 +549,7 @@ stateDiagram-v2
     [*] --> PENDING
     PENDING --> RUNNING: Claim thành công
     RUNNING --> COMPLETED: Output hợp lệ và fencing đạt
-    RUNNING --> UNKNOWN: LLM lỗi không rõ hoặc lease AI hết hạn
+    RUNNING --> UNKNOWN: LLM/COLLECT lỗi không rõ hoặc lease trả phí hết hạn
     RUNNING --> NEEDS_REVIEW: Output/config/budget không đạt
     RUNNING --> FAILED: Lỗi SCORE hoặc hết retry an toàn
     RUNNING --> PENDING: SCORE hết lease còn lượt hoặc 429 còn lượt
@@ -552,19 +579,21 @@ Khoản giữ chỗ USD =
 
 Khi có usage thành công, chi phí ước tính theo token thực tế thay thế khoản giữ chỗ. Nếu thiếu usage, giữ ước tính. Nếu output lỗi/timeout/kết quả không rõ, khoản đã giữ không tự được hoàn lại. Với `429` được phân loại là từ chối an toàn, khoản giữ chỗ của attempt được giải phóng.
 
-Thiếu API key được phát hiện trong adapter, **sau** bước ghi `REQUEST_STARTED`. Vì vậy trong code hiện tại, case thiếu key có thể có lần bắt đầu và khoản giữ chỗ trong DB dù chưa phát sinh request provider thực tế. Metrics/cost của dự án không phải sổ billing chính xác.
+Thiếu OpenAI API key được phát hiện trong adapter, **sau** bước ghi `REQUEST_STARTED`. Vì vậy case này có thể có lần bắt đầu và khoản giữ chỗ trong DB dù chưa phát sinh request provider thực tế. Cấu hình Tavily được kiểm tra trước collection intent. Metrics/cost của dự án không phải sổ billing chính xác.
 
-### 9.2. Hai trần độc lập
+### 9.2. Các trần độc lập
 
 | Trần | Mặc định | Tính gì? |
 |---|---:|---|
 | `MAX_STEP_ATTEMPTS` | 3 | Số lần claim thành công cho mỗi step, kể cả attempt chết trước khi gọi provider |
 | `MAX_LLM_CALLS_PER_JOB` | 3 | Số attempt toàn job có `llm_started_at`, gồm lần bị `429` và retry thủ công |
 | `MAX_ESTIMATED_USD_PER_JOB` | 0,20 | Tổng chi phí ước tính hiện tại cộng khoản chuẩn bị giữ chỗ |
+| `COLLECT_MAX_ATTEMPTS` | 2 | Trần claim/request collection, không vượt `MAX_STEP_ATTEMPTS`; tách khỏi LLM calls |
 
 Một job bình thường cần ba bước AI. Với trần mặc định ba lần, một `429` đã được tính là lần bắt đầu có thể khiến job hết quota trước REPORT, dù bước đó còn lượt retry. Muốn cho phép thêm lần thử, người vận hành phải chủ động tăng trần phù hợp, khởi động lại service và kiểm tra trạng thái trước khi retry.
 
-Nếu vượt trần trước call, step/job đi về `NEEDS_REVIEW`, mã `BUDGET_EXCEEDED`; không gửi call đó ra provider.
+Nếu vượt trần LLM call/USD trước call, step/job đi về `NEEDS_REVIEW`, mã `BUDGET_EXCEEDED`; không gửi call đó ra provider. Collection intent có kiểm tra riêng với `COLLECT_ATTEMPT_LIMIT_EXCEEDED`.
+Đoạn giữ chỗ USD ở trên áp dụng cho LLM. COLLECT ghi `collection_started_at`, counter và audit riêng trước dispatch; không tăng `llm_calls` hoặc giữ chỗ USD LLM. Usage/credits Tavily chỉ ghi khi provider trả về, có thể null; không suy ra USD hoặc giới hạn dollar cứng từ credits.
 
 ### 9.3. Phân biệt các retry
 
@@ -576,7 +605,8 @@ Nếu vượt trần trước call, step/job đi về `NEEDS_REVIEW`, mã `BUDGE
 | SDK OpenAI | `max_retries=0` |
 | Agent/guardrail | Retry bằng 0, cộng cổng một SDK request mỗi Crew |
 | Provider `429` | Lưu trạng thái retry trong DB nếu còn attempt; không dùng Celery autoretry |
-| Provider timeout/kết quả không rõ | Không tự retry LLM |
+| HTTP Tavily | Không retry ngầm trong httpx; tối đa một Search request mỗi attempt |
+| Provider timeout/kết quả không rõ | Không tự retry LLM hoặc COLLECT; Tavily 5xx/network cũng cần duyệt |
 | Admin retry | Yêu cầu token, xác nhận khả năng tính phí trùng và còn đủ giới hạn |
 
 Database chỉ replay callback DB cho các nhóm lỗi có rollback xác định được hỗ trợ; không tự replay lỗi kết nối/commit không rõ. Callback không chứa LLM hay publish broker.
@@ -601,7 +631,7 @@ Mỗi lượt mặc định lấy tối đa 100 step `RUNNING` có `lease_expire
 
 | Step hết lease | Trạng thái step | Trạng thái attempt | Trạng thái job |
 |---|---|---|---|
-| RESEARCH / CLASSIFY / REPORT | `UNKNOWN` | `UNKNOWN` | `NEEDS_REVIEW` |
+| COLLECT / RESEARCH / CLASSIFY / REPORT | `UNKNOWN` | `UNKNOWN` | `NEEDS_REVIEW` |
 | SCORE còn attempt | `PENDING` | `FAILED` | `PENDING` |
 | SCORE hết attempt | `FAILED` | `FAILED` | `FAILED` |
 
@@ -660,6 +690,7 @@ Các điều kiện phải đồng thời đạt:
 - Body hợp lệ và xác nhận đúng literal `true`; không đạt → `422`.
 - Bước được chọn là bước chưa hoàn tất đầu tiên.
 - Bước đó ở `UNKNOWN` hoặc `NEEDS_REVIEW`, còn step attempt.
+- COLLECT chỉ có ở Tavily job và chịu thêm trần `COLLECT_MAX_ATTEMPTS`, vẫn cần xác nhận khả năng tính phí trùng.
 - Tất cả bước sau vẫn `PENDING`; không cho giữ một checkpoint phía sau đã tính từ dữ liệu cũ.
 
 Sai điều kiện nghiệp vụ → `409 RETRY_NOT_ALLOWED`. Nếu đạt, trong transaction: khóa job, reset step về `PENDING`, xóa thời gian chờ retry, reset trạng thái/lỗi job, ghi `MANUAL_RETRY_ACKNOWLEDGED`, rồi commit. Sau đó mới publish và trả `202`.
@@ -699,11 +730,12 @@ Attempt count, lịch sử attempt và chi phí cũ không được xóa. Lần 
 | Task lặp lại sau khi job hoàn tất | Runner thoát, không gọi thêm LLM |
 | Hai worker nhận cùng job | Chỉ một claim thành công cho cùng bước; message còn lại không vượt được cổng DB |
 | Bước đang `RUNNING` | Claim chỉ nhận `PENDING`; delivery mới thoát. Lease hết hạn phải chờ scanner chuyển trạng thái |
-| Crash sau claim, trước request | AI step hết lease → `UNKNOWN`; SCORE hết lease → retry an toàn nếu còn attempt |
+| Crash sau claim, trước request | LLM/COLLECT hết lease → `UNKNOWN`; SCORE hết lease → retry an toàn nếu còn attempt |
 | Crash sau `REQUEST_STARTED`, trước gửi provider | Không thể dùng dấu mốc này để biết remote có chạy; hết lease → `UNKNOWN` |
 | Crash trong khi chờ provider | Heartbeat mất theo process; hết lease → `UNKNOWN`; không tự gọi lại AI |
 | Provider trả xong, crash trước checkpoint | Output chưa bền vững; hết lease → `UNKNOWN`; retry có thể bị tính phí trùng |
 | Crash sau RESEARCH checkpoint | RESEARCH vẫn `COMPLETED`; resume tái sử dụng checkpoint và chạy CLASSIFY |
+| Crash sau COLLECT checkpoint | Nguồn đã lưu được tái sử dụng; resume không gọi Search lại |
 | Crash giữa hai bước khi job còn `RUNNING` nhưng không có lease active | Resume scanner có thể enqueue vì job còn PENDING work hợp lệ |
 | Crash sau REPORT checkpoint/finalization | Output REPORT và job COMPLETED nằm cùng transaction; không cần finalize riêng bằng task khác |
 | Lease hết hạn nhưng worker cũ còn chạy | Completion/heartbeat không qua fence; không ghi đè output |
@@ -716,7 +748,9 @@ Attempt count, lịch sử attempt và chi phí cũ không được xóa. Lần 
 | Tình huống | Trạng thái theo implementation hiện tại |
 |---|---|
 | Thiếu OpenAI API key | `NEEDS_REVIEW`, mã `PROVIDER_NOT_CONFIGURED`; có thể đã giữ chỗ cost |
-| HTTP `429` | Nhánh safe retry có backoff, còn chịu trần attempt/call/budget |
+| HTTP `429` | Safe retry có backoff, chịu trần tương ứng; Tavily không dùng LLM call/USD budget |
+| Tavily thiếu key hoặc 401/403/response sai schema | `NEEDS_REVIEW`, lỗi sanitize; không gọi LLM; xem [bảng lỗi Tavily](tavily-collection.vi.md) |
+| Tavily timeout/network/5xx | `UNKNOWN`/`NEEDS_REVIEW`, không tự search lại; admin quyết định retry |
 | Timeout, lỗi kết nối, HTTP `5xx` | Khi đi qua nhánh exception chung của bước AI: `UNKNOWN` và job `NEEDS_REVIEW` |
 | HTTP `400`/`422`, `401`, `403`, `404` | `NEEDS_REVIEW`, lần lượt có mã `PROVIDER_REQUEST_INVALID`, `PROVIDER_AUTHENTICATION_FAILED`, `PROVIDER_PERMISSION_DENIED`, `PROVIDER_MODEL_NOT_FOUND` |
 | Provider refusal hoặc output bị cắt | `NEEDS_REVIEW`, mã `PROVIDER_REFUSED_OUTPUT` hoặc `OUTPUT_TOKEN_LIMIT_REACHED`; không tự request thêm để sửa |
@@ -791,9 +825,9 @@ bootstrap/ và runtime.py lắp ghép implementation cụ thể; main.py đăng 
 
 | Bảng | Dữ liệu và vai trò |
 |---|---|
-| `ai_jobs` | Request identity, input, trạng thái tổng, lỗi, tổng chi phí ước tính và final result |
+| `ai_jobs` | Request identity, input, workflow version, trạng thái tổng, lỗi, tổng chi phí LLM ước tính và final result |
 | `ai_steps` | Trạng thái từng bước, input/output hash, output, attempt count, lease và retry time |
-| `ai_step_attempts` | Lịch sử từng lần claim/gọi, lease token, usage, provider request ID và lỗi |
+| `ai_step_attempts` | Lịch sử từng lần claim/gọi, lease token, token/LLM cost, collection_started_at/collection_usage, provider request ID và lỗi |
 | `ai_job_events` | Audit timeline: tạo job, claim, request started, checkpoint, hết lease, retry và hoàn tất |
 
 Unique constraint trên key job và cặp `(job_id, step_name)`/`(step_id, attempt_no)` bổ sung cho điều kiện update, không thay thế chúng.
@@ -830,11 +864,11 @@ Hướng dẫn biến môi trường và đổi backend đầy đủ ở [archit
 | Endpoint | Thực sự kiểm tra/trả gì? |
 |---|---|
 | `/health` | API process còn trả lời được |
-| `/ready` | Đọc được một revision trong `alembic_version`, truy vấn được `ai_jobs`, Redis ping không lỗi |
+| `/ready` | Đọc được revision Alembic, truy vấn được các bảng research với schema hiện tại, Redis ping không lỗi |
 | `/api/v1/research/jobs/{id}/events` | Event theo thời gian/ID, phân trang bằng offset/limit; limit mặc định 100, tối đa 500 |
-| `/api/v1/admin/metrics` | Count job/step theo status, count audit event theo loại, attempted LLM starts, tổng token đã ghi và cost estimate |
+| `/api/v1/admin/metrics` | Count job/step/event, attempted LLM starts, token và LLM cost estimate; collection starts/credits tách riêng |
 
-`/ready` không xác nhận revision bằng head hiện tại, không kiểm tra đầy đủ mọi bảng, không kiểm tra worker/Beat và không gọi OpenAI. API healthy vẫn có thể chưa có key hoặc chưa có worker xử lý queue.
+`/ready` không xác nhận revision bằng head hiện tại, không kiểm tra worker/Beat và không gọi OpenAI/Tavily. Schema probes đọc Job, Step, Attempt và Event giúp phát hiện thiếu migration collection. API healthy vẫn có thể chưa có key hoặc chưa có worker xử lý queue.
 
 Metrics không phải billing ledger hoặc bộ counter trọn đời. Event count có thể giảm khi cleanup, usage có thể thiếu cho các request lỗi/crash, còn `llm_calls` là số dấu mốc bắt đầu được ghi trong DB.
 
@@ -849,6 +883,7 @@ Ví dụ các tên quan trọng:
 | `JOB_CREATED` | Job và các step được tạo |
 | `STEP_CLAIMED` | Claim và attempt được ghi nhận |
 | `LLM_REQUEST_STARTED` | Dấu mốc trước gọi và khoản giữ chỗ |
+| `COLLECTION_REQUEST_STARTED` | Intent gọi Tavily và counter collection riêng; không là LLM generation |
 | `STEP_CHECKPOINTED` | Output đã checkpoint |
 | `LEASE_EXPIRED`, `STEP_UNKNOWN`, `STEP_RECOVERED` | Quyết định scanner |
 | `SAFE_RETRY_SCHEDULED` | Đã đặt thời gian retry an toàn |
@@ -902,8 +937,8 @@ Chỉ dùng với `APP_ENV=development`. `FAILURE_STEP` chọn bước; `FAILURE
 | Hook | Vị trí |
 |---|---|
 | `claim` | Sau claim commit, trước scope xử lý bước |
-| `request_started` | Sau ghi request-start/cost, trước adapter; chỉ ở bước AI |
-| `response` | Sau adapter trả kết quả, trước checkpoint; chỉ ở bước AI |
+| `request_started` | Sau ghi request intent/cost, trước adapter; áp dụng LLM và COLLECT |
+| `response` | Sau adapter trả kết quả, trước checkpoint; áp dụng LLM và COLLECT |
 | `checkpoint` | Sau khi checkpoint đã commit |
 
 Hook ném `InjectedCrash` kế thừa `BaseException`, không bị các nhánh exception nghiệp vụ bắt lại; task wrapper thoát process với mã 86. Với Compose restart policy, worker có thể tự lên lại. Muốn kết thúc demo, xóa hook rồi tạo lại AI worker; chỉ sửa file `.env` chưa làm tiến trình đang chạy đọc lại cấu hình.
@@ -914,7 +949,7 @@ Demo quan trọng: crash sau RESEARCH checkpoint rồi resume phải giữ attem
 
 Bản cập nhật async/DDD đã ghi nhận **53 test pass trên Windows và 53 test pass trong Linux container**, với SQLite, PostgreSQL và Redis thật; provider luôn được mock. Có test chạy CrewAI thật với SDK async mock, tranh chấp idempotency/claim, fencing, scanner overlap, checkpoint reuse, API contracts, budget, session release trước provider, event-loop responsiveness và engine disposal qua task Celery.
 
-Migration PostgreSQL đã qua upgrade/check/downgrade/upgrade trên DB test cô lập; SQLite không có schema drift trong lần xác minh. Đây là bằng chứng cho các case đã kiểm thử, không phải kiểm chứng mọi tổ hợp lỗi/hạ tầng có thể tồn tại. Smoke test OpenAI thật chưa được ghi nhận thành công do chưa cấu hình key ở lần bàn giao.
+Migration timestamp PostgreSQL của bản cập nhật async/DDD đã qua upgrade/check/downgrade/upgrade trên DB test cô lập; SQLite không có schema drift trong lần xác minh đó. Bằng chứng mới cho F001 và migration collection được ghi tại [verification](verification.md). Đây là bằng chứng cho các case đã kiểm thử, không phải kiểm chứng mọi tổ hợp lỗi/hạ tầng có thể tồn tại. Smoke provider thật chỉ chạy khi được yêu cầu và xác nhận chi phí.
 
 Các giới hạn còn lại:
 
@@ -937,11 +972,12 @@ Các giới hạn còn lại:
 | API endpoints và status HTTP | [api/research/router.py](../src/company_ai/api/research/router.py), [admin/router.py](../src/company_ai/api/admin/router.py), [health/router.py](../src/company_ai/api/health/router.py) |
 | Input/output HTTP | [api/research/schemas.py](../src/company_ai/api/research/schemas.py) |
 | Use case tạo/đọc/retry và enqueue gap | [application/research/jobs.py](../src/company_ai/application/research/jobs.py) |
-| Vòng lặp bốn bước, input hash và phân loại lỗi | [application/research/execute_workflow.py](../src/company_ai/application/research/execute_workflow.py) |
+| Vòng lặp theo các bước thực tế, input hash và phân loại lỗi | [application/research/execute_workflow.py](../src/company_ai/application/research/execute_workflow.py) |
 | Heartbeat và failure hook | [application/research/step_executor.py](../src/company_ai/application/research/step_executor.py) |
 | Resume và giới hạn reconciliation | [application/research/recovery.py](../src/company_ai/application/research/recovery.py) |
 | Prompt và cost reservation | [application/research/prompts.py](../src/company_ai/application/research/prompts.py) |
 | Domain entities và điều kiện retry | [domain/research/entities.py](../src/company_ai/domain/research/entities.py) |
+| Collection contract, nguồn hiệu lực và Tavily adapter | [domain/research/collection.py](../src/company_ai/domain/research/collection.py), [collection/tavily.py](../src/company_ai/infrastructure/research/collection/tavily.py) |
 | Policy ngân sách, recovery, evidence | [domain/research/policies.py](../src/company_ai/domain/research/policies.py) |
 | Scoring và schema checkpoint | [domain/research/scoring.py](../src/company_ai/domain/research/scoring.py), [domain/research/outputs.py](../src/company_ai/domain/research/outputs.py) |
 | Transaction, claim, fencing, scanner và metrics | [infrastructure/research/persistence/repositories.py](../src/company_ai/infrastructure/research/persistence/repositories.py) |

@@ -4,7 +4,7 @@ Thư mục này lưu đặc tả có thể dùng trực tiếp làm đầu vào 
 
 | ID | Feature | Trạng thái | Đặc tả |
 |---|---|---|---|
-| F001 | Thu thập nguồn web bằng Tavily trước Research | READY — chưa triển khai | [F001-tavily-collection.md](F001-tavily-collection.md) |
+| F001 | Thu thập nguồn web bằng Tavily trước Research | IMPLEMENTED — 2026-10-18 | [F001-tavily-collection.md](F001-tavily-collection.md) |
 | F002 | Chọn LLM provider/model theo từng step — OpenAI và Ollama | READY — chưa triển khai | [F002-per-step-llm-providers.md](F002-per-step-llm-providers.md) |
 | F003 | Admin research API end to end và hướng dẫn DDD từng layer | READY — chưa triển khai | [F003-admin-api-ddd.md](F003-admin-api-ddd.md) |
 

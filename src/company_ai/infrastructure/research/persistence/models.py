@@ -42,6 +42,9 @@ class Job(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
     idempotency_key: Mapped[str] = mapped_column(String(200), unique=True)
     request_hash: Mapped[str] = mapped_column(String(64))
+    workflow_version: Mapped[str] = mapped_column(
+        String(40), default="manual-v1", server_default="manual-v1"
+    )
     status: Mapped[str] = mapped_column(String(20), default="PENDING", index=True)
     input_json: Mapped[dict] = mapped_column(JSON)
     result_json: Mapped[dict | None] = mapped_column(JSON)
@@ -83,6 +86,8 @@ class Attempt(Base):
     status: Mapped[str] = mapped_column(String(20), default="CLAIMED")
     provider_request_id: Mapped[str | None] = mapped_column(String(200))
     llm_started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    collection_started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    collection_usage: Mapped[dict | None] = mapped_column(JSON)
     error_type: Mapped[str | None] = mapped_column(String(80))
     tokens_input: Mapped[int | None] = mapped_column(Integer)
     tokens_output: Mapped[int | None] = mapped_column(Integer)

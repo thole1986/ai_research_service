@@ -1,7 +1,15 @@
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, StringConstraints
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    HttpUrl,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -10,14 +18,35 @@ class JobInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     company_name: Annotated[Text, Field(max_length=200)]
     website: HttpUrl | None = None
-    company_description: Annotated[Text, Field(max_length=20000)]
+    company_description: Annotated[str, StringConstraints(strip_whitespace=True)] = Field(
+        "", max_length=20000
+    )
     website_text: str = Field("", max_length=20000)
     icp: Annotated[Text, Field(max_length=2000)]
+    collection_mode: Literal["manual", "tavily"] = "manual"
+
+    @field_validator("website")
+    @classmethod
+    def website_without_credentials(cls, value):
+        if value is not None and (value.username is not None or value.password is not None):
+            raise ValueError("website must not contain credentials")
+        return value
+
+    @field_validator("company_description", mode="before")
+    @classmethod
+    def optional_description(cls, value):
+        return "" if value is None else value
+
+    @model_validator(mode="after")
+    def manual_description_required(self):
+        if self.collection_mode == "manual" and not self.company_description:
+            raise ValueError("company_description is required in manual mode")
+        return self
 
 
 class RetryInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    step_name: Literal["RESEARCH", "CLASSIFY", "SCORE", "REPORT"]
+    step_name: Literal["COLLECT", "RESEARCH", "CLASSIFY", "SCORE", "REPORT"]
     acknowledge_possible_duplicate_charge: Literal[True]
 
 

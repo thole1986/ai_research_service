@@ -8,7 +8,7 @@ from pydantic import ValidationError
 
 from company_ai.application.research.prompts import messages, provider_schema
 from company_ai.domain.research.contracts import AIResult, InvalidOutput, SafeFailure
-from company_ai.domain.research.outputs import SCHEMAS
+from company_ai.domain.research.outputs import schema_for
 from company_ai.infrastructure.research.ai.crew_factory import make_crew
 from company_ai.observability import NoOpObserver
 
@@ -73,7 +73,7 @@ def bounded_llm(settings, step, payload, client, observer=None):
                         response_format={
                             "type": "json_schema",
                             "json_schema": {
-                                "name": SCHEMAS[step].__name__,
+                                "name": schema_for(step, payload).__name__,
                                 "strict": True,
                                 "schema": provider_schema(step, payload),
                             },
@@ -112,7 +112,9 @@ def bounded_llm(settings, step, payload, client, observer=None):
                         raise InvalidOutput("PROVIDER_CONTENT_FILTERED")
                     if choice.finish_reason != "stop":
                         raise InvalidOutput("INCOMPLETE_OR_REFUSED_OUTPUT")
-                    output = SCHEMAS[step].model_validate_json(choice.message.content or "")
+                    output = schema_for(step, payload).model_validate_json(
+                        choice.message.content or ""
+                    )
                     self.result = AIResult(
                         output.model_dump(),
                         usage.prompt_tokens if usage else None,
@@ -192,7 +194,7 @@ class CrewAIAdapter:
                 contextlib.redirect_stdout(io.StringIO()),
                 contextlib.redirect_stderr(io.StringIO()),
             ):
-                crew = make_crew(step, llm, self.settings, SCHEMAS[step])
+                crew = make_crew(step, llm, self.settings, schema_for(step, payload))
                 await crew.akickoff()
         except Exception:
             if llm.failure:

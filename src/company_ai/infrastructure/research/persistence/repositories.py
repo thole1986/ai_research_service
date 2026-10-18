@@ -1,9 +1,16 @@
 from datetime import timedelta
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from company_ai.domain.research.contracts import STEPS, Claim
+from company_ai.domain.research.contracts import (
+    ALL_STEPS,
+    COLLECTION_WORKFLOW_VERSION,
+    LEGACY_WORKFLOW_VERSION,
+    Claim,
+    step_order,
+    steps_for_mode,
+)
 from company_ai.domain.research.entities import JobEvent, ResearchJob, ResearchStep
 from company_ai.domain.research.errors import Conflict
 from company_ai.domain.research.hashing import digest
@@ -30,6 +37,17 @@ def event(session, job_id, kind, step_id=None, **details):
     session.add(Event(job_id=job_id, step_id=step_id, event_type=kind, details_json=details))
 
 
+def canonical_payload(payload):
+    """Compare old stored requests with current API defaults without rewriting inputs."""
+    return {
+        "website": None,
+        "website_text": "",
+        "company_description": "",
+        "collection_mode": "manual",
+        **payload,
+    }
+
+
 class SqlAlchemyResearchRepository:
     """Research aggregate persistence; HTTP and workers inject their session scope."""
 
@@ -39,14 +57,34 @@ class SqlAlchemyResearchRepository:
     async def _lock_job(self, s, job_id):
         await s.execute(update(Job).where(Job.id == job_id).values(updated_at=Job.updated_at))
 
+    def _max_attempts(self, step_name):
+        if step_name == "COLLECT":
+            return min(self.settings.collect_max_attempts, self.settings.max_step_attempts)
+        return self.settings.max_step_attempts
+
+    def _attempt_ceiling(self):
+        return case(
+            (Step.step_name == "COLLECT", self._max_attempts("COLLECT")),
+            else_=self.settings.max_step_attempts,
+        )
+
     async def create_job_idempotently(self, key, payload):
         request_hash = digest(payload)
+        mode = payload.get("collection_mode", "manual")
 
         async def create(s):
-            job = Job(id=uid(), idempotency_key=key, request_hash=request_hash, input_json=payload)
+            job = Job(
+                id=uid(),
+                idempotency_key=key,
+                request_hash=request_hash,
+                input_json=payload,
+                workflow_version=(
+                    COLLECTION_WORKFLOW_VERSION if mode == "tavily" else LEGACY_WORKFLOW_VERSION
+                ),
+            )
             s.add(job)
             await s.flush()
-            s.add_all((Step(job_id=job.id, step_name=name) for name in STEPS))
+            s.add_all((Step(job_id=job.id, step_name=name) for name in steps_for_mode(mode)))
             event(s, job.id, "JOB_CREATED")
             return (snapshot(ResearchJob, job), True)
 
@@ -57,7 +95,9 @@ class SqlAlchemyResearchRepository:
                 job = await s.scalar(select(Job).where(Job.idempotency_key == key))
                 if job is None:
                     raise
-                if job.request_hash != request_hash:
+                if job.request_hash != request_hash and canonical_payload(
+                    job.input_json
+                ) != canonical_payload(payload):
                     raise Conflict("IDEMPOTENCY_KEY_CONFLICT") from None
                 return (snapshot(ResearchJob, job), False)
 
@@ -69,7 +109,7 @@ class SqlAlchemyResearchRepository:
                 snapshot(ResearchJob, job),
                 [
                     snapshot(ResearchStep, step)
-                    for step in sorted(steps, key=lambda x: STEPS.index(x.step_name))
+                    for step in sorted(steps, key=lambda x: step_order(x.step_name))
                 ],
             )
 
@@ -100,7 +140,7 @@ class SqlAlchemyResearchRepository:
                 select(Step.id)
                 .where(
                     Step.job_id == target.job_id,
-                    Step.step_name.in_(STEPS[: STEPS.index(target.step_name)]),
+                    Step.step_name.in_(ALL_STEPS[: step_order(target.step_name)]),
                     Step.status != "COMPLETED",
                 )
                 .correlate(None)
@@ -111,7 +151,7 @@ class SqlAlchemyResearchRepository:
                     .where(
                         Step.id == step_id,
                         Step.status == "PENDING",
-                        Step.attempt_count < self.settings.max_step_attempts,
+                        Step.attempt_count < self._max_attempts(target.step_name),
                         or_(Step.next_retry_at.is_(None), Step.next_retry_at <= stamp),
                         Step.job_id.in_(
                             select(Job.id).where(Job.status.in_(["PENDING", "RUNNING"]))
@@ -160,6 +200,8 @@ class SqlAlchemyResearchRepository:
     def fence(claim):
         return and_(
             Step.id == claim.step_id,
+            Step.job_id == claim.job_id,
+            Step.step_name == claim.step_name,
             Step.status == "RUNNING",
             Step.lease_token == claim.token,
             Step.input_hash == claim.input_hash,
@@ -184,6 +226,8 @@ class SqlAlchemyResearchRepository:
         return await self.db.write(operation_0)
 
     async def request_started(self, claim, reserved_cost):
+        if claim.step_name == "COLLECT":
+            return False
 
         async def start(s):
             await self._lock_job(s, claim.job_id)
@@ -224,6 +268,44 @@ class SqlAlchemyResearchRepository:
 
         return await self.db.write(start)
 
+    async def collection_request_started(self, claim):
+        if claim.step_name != "COLLECT":
+            return False
+
+        async def start(s):
+            await self._lock_job(s, claim.job_id)
+            if (
+                await s.execute(update(Step).where(self.fence(claim)).values(updated_at=now()))
+            ).rowcount != 1:
+                return False
+            attempt = await s.get(Attempt, claim.attempt_id)
+            if (
+                attempt is None
+                or attempt.step_id != claim.step_id
+                or attempt.lease_token != claim.token
+                or attempt.status != "CLAIMED"
+            ):
+                return False
+            calls = await s.scalar(
+                select(func.count(Attempt.id))
+                .join(Step)
+                .where(Step.job_id == claim.job_id, Attempt.collection_started_at.is_not(None))
+            )
+            if calls >= self._max_attempts("COLLECT"):
+                await self._failure(s, claim, "NEEDS_REVIEW", "COLLECT_ATTEMPT_LIMIT_EXCEEDED")
+                return False
+            attempt.status, attempt.collection_started_at = "REQUEST_STARTED", now()
+            event(
+                s,
+                claim.job_id,
+                "COLLECTION_REQUEST_STARTED",
+                claim.step_id,
+                attempt_id=claim.attempt_id,
+            )
+            return True
+
+        return await self.db.write(start)
+
     async def complete_step_with_fencing(self, claim, output, result=None, cost=None):
 
         async def complete(s):
@@ -248,13 +330,22 @@ class SqlAlchemyResearchRepository:
                 return False
             attempt = await s.get(Attempt, claim.attempt_id)
             if result:
-                attempt.tokens_input, attempt.tokens_output = (
-                    result.tokens_input,
-                    result.tokens_output,
-                )
+                if claim.step_name == "COLLECT":
+                    usage = result.output.get("usage")
+                    credits = result.output.get("credits")
+                    attempt.collection_usage = (
+                        {"usage": usage, "credits": credits}
+                        if usage is not None or credits is not None
+                        else None
+                    )
+                else:
+                    attempt.tokens_input, attempt.tokens_output = (
+                        result.tokens_input,
+                        result.tokens_output,
+                    )
                 attempt.provider_request_id = result.provider_request_id
             job = await s.get(Job, claim.job_id)
-            if cost is not None:
+            if cost is not None and claim.step_name != "COLLECT":
                 job.total_estimated_cost_usd = max(
                     0,
                     float(job.total_estimated_cost_usd)
@@ -323,11 +414,12 @@ class SqlAlchemyResearchRepository:
                 return False
             attempt = await s.get(Attempt, claim.attempt_id)
             job = await s.get(Job, claim.job_id)
-            job.total_estimated_cost_usd = max(
-                0, float(job.total_estimated_cost_usd) - float(attempt.estimated_cost_usd or 0)
-            )
-            attempt.estimated_cost_usd = 0
-            if attempt.attempt_no < self.settings.max_step_attempts:
+            if claim.step_name != "COLLECT":
+                job.total_estimated_cost_usd = max(
+                    0, float(job.total_estimated_cost_usd) - float(attempt.estimated_cost_usd or 0)
+                )
+                attempt.estimated_cost_usd = 0
+            if attempt.attempt_no < self._max_attempts(claim.step_name):
                 step = await s.get(Step, claim.step_id)
                 step.status = "PENDING"
                 step.next_retry_at = now() + timedelta(seconds=min(300, 2**attempt.attempt_no))
@@ -391,7 +483,7 @@ class SqlAlchemyResearchRepository:
                     continue
                 deterministic = row.step_name == "SCORE"
                 status, job_status, attempt_status = expired_step_outcome(
-                    row.step_name, row.attempt_count, self.settings.max_step_attempts
+                    row.step_name, row.attempt_count, self._max_attempts(row.step_name)
                 )
                 await s.execute(
                     update(Step).where(Step.id == step_id).values(status=status, lease_token=None)
@@ -426,14 +518,14 @@ class SqlAlchemyResearchRepository:
                         Step.status == "PENDING",
                         or_(
                             Step.next_retry_at > now(),
-                            Step.attempt_count >= self.settings.max_step_attempts,
+                            Step.attempt_count >= self._attempt_ceiling(),
                         ),
                     ),
                 )
             )
             eligible = select(Step.job_id).where(
                 Step.status == "PENDING",
-                Step.attempt_count < self.settings.max_step_attempts,
+                Step.attempt_count < self._attempt_ceiling(),
                 or_(Step.next_retry_at.is_(None), Step.next_retry_at <= now()),
             )
             return list(
@@ -457,7 +549,7 @@ class SqlAlchemyResearchRepository:
             candidate_id = ResearchJob.retry_candidate(
                 [snapshot(ResearchStep, step) for step in steps],
                 step_name,
-                self.settings.max_step_attempts,
+                self._max_attempts(step_name),
             )
             unfinished = next((step for step in steps if step.id == candidate_id))
             unfinished.status, unfinished.next_retry_at = ("PENDING", None)
@@ -491,6 +583,23 @@ class SqlAlchemyResearchRepository:
 
     async def metrics(self):
         async with self.db.session() as s:
+            usage_records = list(
+                await s.scalars(
+                    select(Attempt.collection_usage).where(
+                        Attempt.collection_usage.is_not(None),
+                        Attempt.collection_started_at.is_not(None),
+                    )
+                )
+            )
+            collection_usage = {}
+            collection_credits = None
+            for record in usage_records:
+                if not isinstance(record, dict):
+                    continue
+                for name, amount in (record.get("usage") or {}).items():
+                    collection_usage[name] = collection_usage.get(name, 0) + amount
+                if record.get("credits") is not None:
+                    collection_credits = (collection_credits or 0) + record["credits"]
             return {
                 "jobs": dict(
                     (await s.execute(select(Job.status, func.count()).group_by(Job.status))).all()
@@ -508,6 +617,11 @@ class SqlAlchemyResearchRepository:
                 "llm_calls": await s.scalar(
                     select(func.count(Attempt.id)).where(Attempt.llm_started_at.is_not(None))
                 ),
+                "collection_calls": await s.scalar(
+                    select(func.count(Attempt.id)).where(Attempt.collection_started_at.is_not(None))
+                ),
+                "collection_usage": collection_usage,
+                "collection_credits": collection_credits,
                 "tokens_input": await s.scalar(select(func.sum(Attempt.tokens_input))) or 0,
                 "tokens_output": await s.scalar(select(func.sum(Attempt.tokens_output))) or 0,
                 "estimated_cost_usd": float(

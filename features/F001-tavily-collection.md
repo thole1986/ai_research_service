@@ -1,9 +1,9 @@
 # F001 — Thu thập nguồn web bằng Tavily trước Research
 
-- Trạng thái: READY — chưa triển khai.
+- Trạng thái: IMPLEMENTED — 2026-10-18.
 - Ngày tạo: 2026-10-17.
 - Lựa chọn đã thống nhất: service gọi Tavily trước Research (cách 1).
-- Tài liệu này là kế hoạch triển khai; không mô tả tính năng đã có.
+- Đặc tả đã được triển khai; bằng chứng kiểm tra và giới hạn nằm tại mục 11.
 
 ## 1. Mục tiêu và phạm vi
 
@@ -209,19 +209,19 @@ tuân thủ content-capture policy, không lọt qua metadata.
 
 ## 8. Checklist triển khai theo thứ tự
 
-- [ ] Đọc hướng dẫn repo; ghi nhận tests baseline và code hiện tại liên quan.
-- [ ] Chốt contract API, version workflow và provenance schema theo đặc tả này.
-- [ ] Thêm domain contracts/schema/policy, tách thứ tự bước theo job.
-- [ ] Thêm migration/persistence cần thiết, hỗ trợ đọc và resume legacy job.
-- [ ] Thêm settings, collector port, Tavily adapter và lifecycle/wiring.
-- [ ] Tích hợp COLLECT vào dispatch, claim, request audit, checkpoint, hash và recovery.
-- [ ] Xây effective sources; điều chỉnh Research prompt, evidence validation và Report
+- [x] Đọc hướng dẫn repo; ghi nhận tests baseline và code hiện tại liên quan.
+- [x] Chốt contract API, version workflow và provenance schema theo đặc tả này.
+- [x] Thêm domain contracts/schema/policy, tách thứ tự bước theo job.
+- [x] Thêm migration/persistence cần thiết, hỗ trợ đọc và resume legacy job.
+- [x] Thêm settings, collector port, Tavily adapter và lifecycle/wiring.
+- [x] Tích hợp COLLECT vào dispatch, claim, request audit, checkpoint, hash và recovery.
+- [x] Xây effective sources; điều chỉnh Research prompt, evidence validation và Report
       cho workflow mới; giữ Classify/Score hoạt động và giữ hành vi legacy.
-- [ ] Cập nhật API create/get/events/retry/metrics và canonical idempotency.
-- [ ] Thêm kiểm thử ở mục 9 và xử lý các lỗi phát hiện được.
-- [ ] Cập nhật README, tài liệu tiếng Việt, env example và demo payload tavily mode.
-- [ ] Chạy các check liên quan; rà diff để không có secret/raw provider output.
-- [ ] Cập nhật trạng thái đặc tả và index; ghi kết quả kiểm tra, giới hạn còn lại.
+- [x] Cập nhật API create/get/events/retry/metrics và canonical idempotency.
+- [x] Thêm kiểm thử ở mục 9 và xử lý các lỗi phát hiện được.
+- [x] Cập nhật README, tài liệu tiếng Việt, env example và demo payload tavily mode.
+- [x] Chạy các check liên quan; rà diff để không có secret/raw provider output.
+- [x] Cập nhật trạng thái đặc tả và index; ghi kết quả kiểm tra, giới hạn còn lại.
 
 ## 9. Kiểm thử bắt buộc và nghiệm thu
 
@@ -265,5 +265,40 @@ giá hoặc đặc tính retry của provider là cố định theo thời gian.
 
 ## 11. Bằng chứng hoàn thành
 
-Chưa triển khai. Khi hoàn thành, ghi ngày, các thay đổi chính, commands/checks và
-kết quả thực tế, migration cần chạy, cấu hình cần thêm và giới hạn còn lại tại đây.
+Triển khai ngày **2026-10-18**. Hướng dẫn vận hành:
+[Tavily collection](../docs/tavily-collection.vi.md); payload:
+[tavily-company.json](../examples/research/tavily-company.json).
+
+- Hai mode giữ hợp đồng tương thích; workflow `manual-v1` có bốn bước và `tavily-v1`
+  có COLLECT đứng đầu. Hash/schema/prompt manual giữ nguyên; canonical comparison
+  xử lý default mới trên bản lưu legacy, kể cả request sát giới hạn input.
+- Async Tavily REST adapter: một basic Search POST mỗi attempt, URL/text bounded,
+  checkpoint bền vững, evidence_sources kiểm tra quote/source, report nguồn và hạn chế.
+- Collection intent/usage riêng với LLM, retry 429 hữu hạn, unknown cần admin acknowledge,
+  lease/heartbeat/fencing bảo vệ checkpoint. Telemetry không capture content mặc định.
+- Migration mới `26a1018_tavily_collection`; chạy `alembic upgrade head` trước khi
+  khởi động API/worker. Thêm cấu hình Tavily trong `.env.example`; manual không cần key.
+- Baseline trước sửa: `pytest -q --basetemp=data/pytest-f001-baseline`:
+  **75 passed, 37 skipped** (các môi trường PostgreSQL/Redis tùy chọn chưa bật).
+- SQLite full suite: `pytest -q --basetemp=data/pytest-f001-full`:
+  **177 passed, 70 skipped**. Skip thuộc các biến thể PostgreSQL và Redis chưa bật
+  ở lượt chạy này; kết quả PostgreSQL thật được kiểm tra riêng.
+- PostgreSQL 16 thật trong container test tạm: collection workflow/repository,
+  repository/recovery/async invariants **85 passed, 0 skipped**.
+- Full suite cuối với PostgreSQL **16.15** và Redis **7.4.11** thật, bật
+  `TEST_POSTGRES_URL`, `RUN_REDIS_E2E=1`, `TEST_REDIS_URL` trỏ vào container test tạm:
+  `python -m pytest -q --disable-warnings --basetemp data/f001-audit-full-pytest`:
+  **247 passed, 0 skipped**, 58,67 giây. Bao gồm cả hai broker E2E cases.
+- SQLite và PostgreSQL: migration từ revision cũ lên head, replay legacy pending/
+  partially completed/completed, và `alembic check` đều pass; không có schema drift.
+  LLM mock cần lần lượt 3/2/0 call khi replay các trạng thái legacy trên PostgreSQL.
+- `ruff check .`, `ruff format --check .` (**102 files already formatted**) và
+  `git diff --check` đều pass. Container PostgreSQL/Redis test đã được gỡ sau kiểm tra;
+  không sửa database hoặc queue ứng dụng.
+- Provider boundary đều mock; không gọi Tavily/OpenAI trả phí. Các cảnh báo dependency
+  hiện có (CrewAI/Alembic/datetime adapter) được giữ trong output kiểm thử.
+
+Giới hạn: snippet có thể thiếu/cũ/sai; substring provenance không chứng minh sự thật
+hoặc bảo đảm tuyệt đối chống prompt injection. Usage/credits chỉ là số provider trả
+ở response đã checkpoint; không phải billing ledger hoặc hard USD cap. Request timeout
+hoặc crash sau dispatch vẫn có thể đã tính phí, vì vậy không tự retry.

@@ -4,6 +4,7 @@ from company_ai.application.research.execute_workflow import run_workflow
 from company_ai.celery_app import celery_app
 from company_ai.domain.research.contracts import InjectedCrash
 from company_ai.infrastructure.research.ai.llm_adapter import CrewAIAdapter
+from company_ai.infrastructure.research.collection.tavily import TavilySourceCollector
 from company_ai.runtime import get_worker_observer, run_async
 
 
@@ -11,11 +12,21 @@ from company_ai.runtime import get_worker_observer, run_async
 def run_job(job_id: str):
     async def execute(repo):
         observer = get_worker_observer()
+        collector = None
         try:
+            job, _ = await repo.get_job(job_id)
+            if job and job.input_json.get("collection_mode", "manual") == "tavily":
+                collector = TavilySourceCollector(repo.settings)
             adapter = CrewAIAdapter(repo.settings, observer=observer)
-            await run_workflow(job_id, repo, adapter, repo.settings, observer=observer)
+            await run_workflow(
+                job_id, repo, adapter, repo.settings, observer=observer, collector=collector
+            )
         finally:
-            await asyncio.to_thread(observer.flush)
+            try:
+                if collector is not None:
+                    await collector.aclose()
+            finally:
+                await asyncio.to_thread(observer.flush)
 
     try:
         run_async(execute)

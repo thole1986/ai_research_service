@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     db_pool_timeout: int = Field(30, ge=1)
     redis_url: str = "redis://localhost:6379/0"
     openai_api_key: SecretStr = SecretStr("")
+    tavily_api_key: SecretStr = SecretStr("")
+    tavily_request_timeout_seconds: int = Field(30, ge=1)
+    tavily_max_results: int = Field(5, ge=1, le=5)
+    collect_max_attempts: int = Field(2, ge=1, le=10)
     openai_model: str = "gpt-4.1-mini"
     llm_temperature: float = Field(0, ge=0, le=2)
     llm_request_timeout_seconds: int = Field(90, ge=1)
@@ -80,8 +84,12 @@ class Settings(BaseSettings):
             raise ValueError("DB_POOL_MODE must be pooled or null")
         if self.database_dsn.drivername not in ("sqlite+aiosqlite", "postgresql+asyncpg"):
             raise ValueError("Use sqlite+aiosqlite or postgresql+asyncpg")
-        if self.lease_ttl_seconds <= self.llm_request_timeout_seconds + 10:
+        if (
+            self.lease_ttl_seconds
+            <= max(self.llm_request_timeout_seconds, self.tavily_request_timeout_seconds) + 10
+        ):
             raise ValueError("Lease TTL must exceed provider timeout by more than 10 seconds")
+        self.collect_max_attempts = min(self.collect_max_attempts, self.max_step_attempts)
         if self.app_env != "development" and self.failure_point:
             raise ValueError("Failure injection is development-only")
         return self

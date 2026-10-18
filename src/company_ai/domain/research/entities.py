@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from company_ai.domain.research.contracts import STEPS
+from company_ai.domain.research.contracts import LEGACY_WORKFLOW_VERSION, step_order
 from company_ai.domain.research.errors import Conflict
 
 
@@ -40,6 +40,7 @@ class ResearchJob:
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None
+    workflow_version: str = LEGACY_WORKFLOW_VERSION
 
     @property
     def can_execute(self):
@@ -47,14 +48,14 @@ class ResearchJob:
 
     @staticmethod
     def retry_candidate(steps, step_name, max_attempts):
-        ordered = sorted(steps, key=lambda step: STEPS.index(step.step_name))
+        ordered = sorted(steps, key=lambda step: step_order(step.step_name))
         candidate = next((step for step in ordered if step.status != "COMPLETED"), None)
         if (
             not candidate
             or candidate.step_name != step_name
             or candidate.status not in ("UNKNOWN", "NEEDS_REVIEW")
             or candidate.attempt_count >= max_attempts
-            or any(step.status != "PENDING" for step in ordered[STEPS.index(step_name) + 1 :])
+            or any(step.status != "PENDING" for step in ordered[ordered.index(candidate) + 1 :])
         ):
             raise Conflict("RETRY_NOT_ALLOWED")
         return candidate.id

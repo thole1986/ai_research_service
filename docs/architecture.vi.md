@@ -7,8 +7,8 @@ Bản hiện tại áp dụng DDD cho bounded context **nghiên cứu và đánh
 | Tầng | Vị trí | Trách nhiệm |
 |---|---|---|
 | Domain | `src/company_ai/domain/research/` | Đối tượng `ResearchJob`, `ResearchStep`, sự kiện, hợp đồng đầu ra, quy tắc retry, ngân sách, nguồn dẫn chứng và chấm điểm |
-| Application | `src/company_ai/application/research/` | Use case tạo/đọc/retry job, workflow, heartbeat, recovery; định nghĩa repository/publisher port |
-| Infrastructure | `infrastructure/research/persistence/`, `infrastructure/research/ai/` | ORM, repository, ánh xạ ORM ↔ domain và CrewAI/OpenAI adapter của research |
+| Application | `src/company_ai/application/research/` | Use case tạo/đọc/retry job, workflow, heartbeat, recovery; định nghĩa repository/publisher/collector port |
+| Infrastructure | `infrastructure/research/persistence/`, `infrastructure/research/ai/`, `infrastructure/research/collection/` | ORM, repository, ánh xạ ORM ↔ domain, CrewAI/OpenAI adapter và Tavily collector của research |
 | Hạ tầng dùng chung | `infrastructure/database/`, `messaging.py`, `telemetry/` | Engine, session factory, transaction retry, Celery publisher và telemetry |
 | API | `api/research/`, `api/admin/`, `api/health/` | HTTP, request/response schema và gọi use case qua `Depends` |
 | Composition root | `bootstrap/`, `main.py`, `runtime.py`, `tasks/` | Gắn concrete dependency, quản lý lifespan API và cầu nối task Celery |
@@ -17,6 +17,8 @@ Domain không import SQLAlchemy, FastAPI, CrewAI hoặc Redis. Application phụ
 
 Đây không phải kiến trúc event sourcing hay một hệ thống nhiều bounded context. Sự kiện hiện tại là audit bền vững trong DB; dữ liệu đầu vào/đầu ra của một job vẫn được checkpoint theo từng bước.
 
+Workflow có version: `manual-v1` giữ `RESEARCH → CLASSIFY → SCORE → REPORT`; `tavily-v1` thêm COLLECT đầu tiên. Application gọi `CompanySourceCollector` qua port riêng; `TavilySourceCollector` dùng httpx async và trả `CollectionResult`, không giả lập thành LLM `AIResult`. Domain quản lý schema nguồn, effective sources và provenance. Xem [hướng dẫn Tavily](tavily-collection.vi.md) về cấu hình và audit.
+
 ## 2. Luồng async
 
 - API handler và use case dùng `async def`/`await`.
@@ -24,6 +26,7 @@ Domain không import SQLAlchemy, FastAPI, CrewAI hoặc Redis. Application phụ
 - API: mỗi request nhận một `AsyncSession` qua `Depends(get_session)`. Các dependency trong cùng request tái sử dụng session theo cơ chế cache của FastAPI. `SessionOperations` kết thúc transaction sau mỗi thao tác research; dependency đóng session khi request kết thúc.
 - Worker: mỗi thao tác repository tạo session/transaction riêng. Sau khi commit claim hoặc ghi nhận bắt đầu request, session đóng trước khi chờ LLM. Heartbeat là một asyncio task độc lập với session riêng. Không chia sẻ `AsyncSession` giữa các coroutine chạy đồng thời.
 - OpenAI dùng `AsyncOpenAI` với `max_retries=0`; Crew chạy bằng `await crew.akickoff()`.
+- Tavily dùng `httpx.AsyncClient` không retry ngầm; client được tạo theo nhu cầu chỉ khi job có COLLECT và đóng trong lifecycle task trước khi event loop kết thúc. Manual mode không cần Tavily key/client. Collection cũng giữ heartbeat/fencing và không giữ transaction khi gọi mạng.
 - CrewAI 1.15.28 vẫn gọi một hook đồng bộ từ thread của executor. Adapter chuyển hook về event loop sở hữu `AsyncOpenAI` bằng `run_coroutine_threadsafe`; không tạo một event loop mới cho mỗi request provider. Cổng giới hạn một request được giữ nguyên.
 - Celery vẫn yêu cầu task entrypoint đồng bộ. `runtime.run_async` tạo event loop cho lần thực thi task, tạo engine trong phạm vi đó, chạy use case async và `await dispose()` trước khi đóng loop. Không cache engine async xuyên task/loop/process.
 - Engine và Redis client của API chỉ được tạo khi vào lifespan và được giải phóng khi thoát lifespan, kể cả khi có lỗi. Import `main` hoặc gọi `create_app()` không tạo engine. Vì Celery publish là API đồng bộ, publisher đưa thao tác này vào thread để không chặn event loop API.
@@ -49,6 +52,7 @@ from typing import Annotated
 from fastapi import Depends
 from company_ai.api.research.dependencies import get_job_service
 from company_ai.application.research.jobs import JobService
+
 
 @router.get("/{job_id}")
 async def get_job(
@@ -76,8 +80,10 @@ from company_ai.api.research.dependencies import get_research_repository
 
 app = create_app(settings)
 
+
 async def fake_repository():
     return fake_repo  # Chỉ cần application port, không cần thuộc tính .db
+
 
 app.dependency_overrides[get_research_repository] = fake_repository
 ```
@@ -174,13 +180,17 @@ Schema tiếp tục được quản lý bằng Alembic, không gọi `create_all
 
 Migration đầu tiên vẫn được giữ nguyên. Revision tiếp theo chuyển timestamp PostgreSQL sang kiểu có múi giờ, diễn giải dữ liệu timestamp cũ là UTC. Với SQLite, dữ liệu vẫn lưu UTC theo quy ước cũ và được đọc thành datetime có timezone.
 
+Head `26a1018_tavily_collection` thêm `ai_jobs.workflow_version` (default `manual-v1` cho dữ liệu cũ), `ai_step_attempts.collection_started_at` và `collection_usage`. Cần `alembic upgrade head` trước khi khởi động code mới. Job cũ vẫn có bốn bước, schema/prompt/hash legacy và checkpoint cũ; chỉ job mới chọn Tavily mode có COLLECT. Không sửa migration đã áp dụng và không thay `input_json` của job để gắn nguồn web.
+
+COLLECT ghi intent/counter riêng trước HTTP dispatch; usage/credits được lưu khi provider trả về, tách khỏi token/LLM USD. Checkpoint chứa text thực tế đã chuẩn hóa/cắt giới hạn, URL và ID nguồn. Research giữ `evidence: list[str]` cho scoring và thêm mapping quote → source ID; validator kiểm tra substring trong đúng source. Operator text có ID riêng và URL null. Report kiểm tra URL đã lưu cùng limitations. Khi resume, dùng checkpoint collection đã hoàn tất thay vì tìm kiếm lại.
+
 Chuyển cấu hình từ SQLite sang PostgreSQL sẽ kết nối sang một database khác; **không tự chuyển dữ liệu cũ**. Cần một quy trình xuất/nhập riêng nếu muốn mang job hiện có sang DB mới.
 
 ## 7. Giữ invariant trên cả hai database
 
 Trên SQLite, transaction ghi được tuần tự hóa bởi DB. Trên PostgreSQL, các thao tác thay đổi một job lấy khóa hàng job trước rồi mới thay đổi step/attempt, giúp tránh cập nhật mất ngân sách và giảm deadlock do thứ tự khóa không nhất quán.
 
-Claim và completion vẫn dùng conditional update. Completion yêu cầu đúng lease token, input hash, trạng thái `RUNNING` và lease chưa hết hạn. Quét lease dùng cập nhật có điều kiện; LLM có kết quả không rõ vẫn thành `UNKNOWN` và cần duyệt.
+Claim và completion vẫn dùng conditional update. Completion yêu cầu đúng lease token, input hash, trạng thái `RUNNING` và lease chưa hết hạn. Quét lease dùng cập nhật có điều kiện; LLM hoặc COLLECT có kết quả không rõ vẫn thành `UNKNOWN` và cần duyệt. Predecessor/completion/retry dựa trên các bước thực tế của job.
 
 Chỉ retry transaction cho lỗi SQLite bị khóa hoặc PostgreSQL báo deadlock/serialization failure đã rollback. Không tự replay transaction khi lỗi kết nối/commit có kết quả không xác định. Không có cuộc gọi LLM nào nằm trong callback transaction có thể được replay.
 
@@ -220,6 +230,6 @@ docker compose -p company-ai-db-test -f docker-compose.postgres-test.yml down
 
 Redis E2E dùng Redis bên ngoài ở `localhost:6379/15` mặc định; đổi `TEST_REDIS_URL` khi cần. Test PostgreSQL tạo schema ngẫu nhiên riêng rồi xóa schema đó, không thao tác lên bảng nghiệp vụ có sẵn. Tài khoản test cần quyền tạo/xóa schema. Container PostgreSQL test dùng tmpfs riêng, không dùng volume ứng dụng.
 
-Không có `TEST_POSTGRES_URL` thì các case PostgreSQL được đánh dấu skip. Không có `RUN_REDIS_E2E=1` thì case broker thật được skip. LLM luôn được mock trong test tự động, bao gồm kiểm thử CrewAI thật với SDK async được mock.
+Không có `TEST_POSTGRES_URL` thì các case PostgreSQL được đánh dấu skip. Không có `RUN_REDIS_E2E=1` thì case broker thật được skip. OpenAI/Tavily luôn được mock ở provider boundary trong test tự động, bao gồm kiểm thử CrewAI thật với SDK async được mock.
 
 Tham khảo API chính thức đã kiểm tra: [SQLAlchemy asyncio](https://docs.sqlalchemy.org/en/20/orm/extensions/asyncio.html), [Alembic asyncio](https://alembic.sqlalchemy.org/en/latest/cookbook.html#using-asyncio-with-alembic).

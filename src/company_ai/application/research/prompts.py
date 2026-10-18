@@ -1,8 +1,10 @@
 from company_ai.domain.research.hashing import canonical
-from company_ai.domain.research.outputs import SCHEMAS
+from company_ai.domain.research.outputs import schema_for
 
 PROMPT_VERSION = "evidence-v1"
 SCHEMA_VERSION = "1"
+COLLECTION_PROMPT_VERSION = "collected-evidence-v1"
+COLLECTION_SCHEMA_VERSION = "2"
 INSTRUCTIONS = {
     "RESEARCH": "Extract industry, products, customer segments and verbatim evidence. "
     "Evidence strings MUST be exact substrings of company_description or website_text. "
@@ -23,16 +25,43 @@ SYSTEM = (
     "infer revenue or customer counts, or claim independent verification. Return only schema JSON. "
 )
 
+COLLECTION_INSTRUCTIONS = {
+    "RESEARCH": "Extract industry, products, customer segments and verbatim evidence using ONLY "
+    "the supplied sources. Every evidence string MUST occur verbatim within the content of its "
+    "referenced source. Provide evidence_sources entries {quote, source_id} covering every "
+    "evidence string. Copy source_id exactly; do not invent sources. Operator text is a separate "
+    "source without a verified URL. Search snippets are partial, possibly outdated and unverified. "
+    "State these limitations and any collection warnings. Never use ICP as company evidence.",
+    "REPORT": "Write a concise sales report using the supplied checkpoints and sources. "
+    "Preserve research limitations, collection warnings and missing signals in limitations. "
+    "Include sources entries {source_id, url} for ALL supplied sources, copying their exact URLs "
+    "(null for operator text). Never invent URLs or attribute operator text to a website. "
+    "State that the score is a rule-based estimate, Tavily returned partial search snippets, "
+    "and company identity and factual accuracy have not been independently verified.",
+}
+
+
+def instructions(step, payload):
+    if "sources" in payload and step in COLLECTION_INSTRUCTIONS:
+        return COLLECTION_INSTRUCTIONS[step]
+    return INSTRUCTIONS[step]
+
+
+def prompt_versions(payload):
+    if "sources" in payload:
+        return COLLECTION_PROMPT_VERSION, COLLECTION_SCHEMA_VERSION
+    return PROMPT_VERSION, SCHEMA_VERSION
+
 
 def messages(step, payload):
     return [
-        {"role": "system", "content": SYSTEM + INSTRUCTIONS[step]},
+        {"role": "system", "content": SYSTEM + instructions(step, payload)},
         {"role": "user", "content": canonical(payload)},
     ]
 
 
 def provider_schema(step, payload):
-    schema = SCHEMAS[step].model_json_schema()
+    schema = schema_for(step, payload).model_json_schema()
     if step == "CLASSIFY":
         signals = schema["properties"]["matching_signals"]
         evidence = payload["research"]["evidence"]

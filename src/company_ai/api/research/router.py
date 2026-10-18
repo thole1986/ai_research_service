@@ -19,7 +19,10 @@ async def create_job(
     service: Jobs,
 ):
     payload = body.model_dump(mode="json")
-    if sum(len(str(v or "")) for v in payload.values()) > settings.max_input_chars:
+    input_chars = sum(
+        len(str(value or "")) for key, value in payload.items() if key != "collection_mode"
+    )
+    if input_chars > settings.max_input_chars:
         raise HTTPException(422, "INPUT_TOO_LONG")
     try:
         job, created = await service.create(idempotency_key, payload)
@@ -33,6 +36,11 @@ async def create_job(
 @router.get("/{job_id}", response_model=JobView)
 async def get_job(job_id: str, service: Jobs):
     job, steps = await service.get(job_id)
+    result = job.result_json
+    if result is None and any(step.step_name == "COLLECT" for step in steps):
+        result = {
+            step.step_name.lower(): step.output_json for step in steps if step.status == "COMPLETED"
+        } or None
     return {
         "job_id": job.id,
         "status": job.status,
@@ -53,7 +61,7 @@ async def get_job(job_id: str, service: Jobs):
             }
             for s in steps
         ],
-        "result": job.result_json,
+        "result": result,
     }
 
 

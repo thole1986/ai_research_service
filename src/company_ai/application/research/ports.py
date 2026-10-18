@@ -3,6 +3,7 @@
 from contextlib import AbstractContextManager
 from typing import Any, Protocol
 
+from company_ai.domain.research.collection import CollectionInput, CollectionResult
 from company_ai.domain.research.contracts import AIResult, Claim
 from company_ai.domain.research.entities import JobEvent, ResearchJob, ResearchStep
 
@@ -25,8 +26,13 @@ class ResearchRepository(ResearchJobRepository, Protocol):
     async def claim_step(self, step_id: str, input_hash: str) -> Claim | None: ...
     async def heartbeat(self, claim: Claim) -> bool: ...
     async def request_started(self, claim: Claim, reserved_cost: float) -> bool: ...
+    async def collection_request_started(self, claim: Claim) -> bool: ...
     async def complete_step_with_fencing(
-        self, claim: Claim, output: dict, result: AIResult | None = None, cost: float | None = None
+        self,
+        claim: Claim,
+        output: dict,
+        result: AIResult | CollectionResult | None = None,
+        cost: float | None = None,
     ) -> bool: ...
     async def review_job(self, job_id: str, category: str) -> None: ...
     async def fail(self, claim: Claim, status: str, category: str) -> bool: ...
@@ -38,6 +44,10 @@ class ResearchRepository(ResearchJobRepository, Protocol):
 
 class JobPublisher(Protocol):
     async def __call__(self, job_id: str) -> None: ...
+
+
+class CompanySourceCollector(Protocol):
+    async def collect(self, input: CollectionInput) -> CollectionResult: ...
 
 
 class Observation(Protocol):

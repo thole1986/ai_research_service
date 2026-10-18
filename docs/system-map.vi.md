@@ -1,11 +1,13 @@
 # Bản đồ hệ thống AI Company Research
 
 Tài liệu này giải thích hệ thống từ góc nhìn người dùng, các service đang chạy và
-các layer trong code. Đối chiếu code ngày **2026-10-17**. Các sơ đồ Mermaid có thể xem
+các layer trong code. Đối chiếu code ngày **2026-10-18**. Các sơ đồ Mermaid có thể xem
 trực tiếp bằng Markdown Preview có hỗ trợ Mermaid hoặc trên GitHub.
 
 **Mục đích:** nhận thông tin một doanh nghiệp và chân dung khách hàng lý tưởng (ICP),
 trích xuất dữ liệu, đánh giá độ phù hợp, chấm điểm và tạo báo cáo giúp sàng lọc lead.
+Manual mode mặc định dùng text operator; Tavily mode thêm COLLECT để lưu nguồn web trước
+phân tích. Xem [thu thập nguồn Tavily](tavily-collection.vi.md) để cấu hình và thử API.
 
 ## 1. Bản đồ các thành phần đang có
 
@@ -28,6 +30,7 @@ flowchart TB
         DB[("SQLite hoặc PostgreSQL<br/>Jobs · Steps · Attempts · Events")]
         CREW["CrewAI + bounded adapter<br/>Một generation request / attempt"]
         OAI["OpenAI<br/>Research · Classify · Report"]
+        TAV["Tavily · tùy chọn<br/>COLLECT lưu web snippets"]
         RULE["Python rules<br/>Score 0–100"]
         LF["Langfuse · tùy chọn<br/>Trace / usage / cost estimate"]
     end
@@ -37,6 +40,7 @@ flowchart TB
     REDIS -->|"Queue ai"| AI
     AI -->|"Claim · heartbeat · checkpoint"| DB
     AI --> CREW --> OAI
+    AI -->|"Chỉ Tavily mode"| TAV
     AI --> RULE
     AI -.->|"Telemetry nếu cấu hình"| LF
     BEAT -->|"Task định kỳ"| REDIS
@@ -50,7 +54,7 @@ flowchart TB
     class U,API entry
     class AI,MW,BEAT worker
     class DB,REDIS storage
-    class CREW,OAI,RULE,LF intelligence
+    class CREW,OAI,TAV,RULE,LF intelligence
 ```
 
 | Thành phần | Làm gì? | Nhận → trả / lưu | Khi nào hoạt động? | Code hoặc cấu hình |
@@ -63,6 +67,7 @@ flowchart TB
 | Workflow | Chọn bước tiếp theo, claim quyền xử lý, kiểm tra checkpoint/budget/output | Job + bước trước → bước tiếp theo | Bên trong AI worker | [execute_workflow.py](../src/company_ai/application/research/execute_workflow.py) |
 | CrewAI | Tổ chức agent/task dùng adapter bị giới hạn số call | Payload → output JSON từ LLM | Ba bước cần LLM | [crew_factory.py](../src/company_ai/infrastructure/research/ai/crew_factory.py) |
 | OpenAI adapter | Gửi prompt/schema, đọc usage, chuẩn hóa lỗi | Messages/schema → kết quả có kiểu | Research/Classify/Report | [llm_adapter.py](../src/company_ai/infrastructure/research/ai/llm_adapter.py) |
+| Tavily collector | Một Search request mỗi attempt, lưu text và URL chuẩn hóa | Tên/hostname → source checkpoint, warnings, credits nếu biết | COLLECT chỉ trong Tavily mode | [tavily.py](../src/company_ai/infrastructure/research/collection/tavily.py) |
 | Score Python | Tính điểm theo quy tắc công khai | Research + classification → score/rule_breakdown | Bước SCORE, không gọi model | [scoring.py](../src/company_ai/domain/research/scoring.py) |
 | Database | Lưu nguồn trạng thái nghiệp vụ, kết quả và lịch sử | Jobs, steps, attempts, events | API/worker/bảo trì đều truy cập | [models.py](../src/company_ai/infrastructure/research/persistence/models.py) |
 | Celery Beat | Đặt lịch task bảo trì, không tự chạy phân tích | Lịch → message bảo trì | Theo cấu hình schedule | [celery_app.py](../src/company_ai/celery_app.py) |
@@ -87,10 +92,11 @@ sequenceDiagram
     participant Queue as Redis / Celery
     participant Worker as AI worker + workflow
     participant LLM as CrewAI / OpenAI
+    participant Tavily as Tavily Search
     User->>API: POST JSON + Idempotency-Key
     API->>Service: create(key, payload)
     Service->>Repo: create_job_idempotently(...)
-    Repo->>DB: Lưu job + 4 steps và commit
+    Repo->>DB: Lưu job + 4/5 steps theo mode và commit
     DB-->>Repo: Job đã lưu
     Repo-->>Service: job, created
     opt Job mới được tạo
@@ -101,6 +107,11 @@ sequenceDiagram
     Note over User,Worker: HTTP không đợi model tạo xong báo cáo
     Queue->>Worker: run_job(job_id)
     Worker->>DB: Đọc job, claim bước bằng lease/token
+    opt Tavily mode chưa có checkpoint COLLECT
+        Worker->>Tavily: Một Search request ngoài DB transaction
+        Tavily-->>Worker: Snippets + URL + usage nếu biết
+        Worker->>DB: Validate và checkpoint COLLECT
+    end
     Worker->>LLM: RESEARCH rồi CLASSIFY, mỗi bước lưu checkpoint
     LLM-->>Worker: Structured output
     Worker->>DB: Validate + commit kết quả từng bước
@@ -129,32 +140,37 @@ sequenceDiagram
 Sơ đồ rút gọn đường trả dữ liệu từ DB về API; trong code dữ liệu vẫn lần lượt đi
 qua repository, service rồi router. Không có chuyện DB trực tiếp trả HTTP response.
 
-## 3. Bản đồ bốn bước phân tích
+## 3. Bản đồ các bước thu thập và phân tích
 
 ```mermaid
 flowchart LR
-    IN["Input<br/>Mô tả + website_text + ICP"]
+    IN["Input<br/>Tên + ICP · text/website tùy mode"]
+    T["COLLECT · chỉ Tavily<br/>Tìm và lưu text/URL"]
     R["1 · RESEARCH<br/>LLM trích xuất + dẫn chứng"]
     C["2 · CLASSIFY<br/>LLM so sánh với ICP"]
     S["3 · SCORE<br/>Python tính điểm"]
     P["4 · REPORT<br/>LLM tổng hợp báo cáo"]
-    OUT["DB / GET result<br/>Bốn output + lịch sử"]
-    IN --> R --> C --> S --> P --> OUT
+    OUT["DB / GET result<br/>4/5 output + lịch sử"]
+    IN -->|manual| R
+    IN -->|tavily| T --> R
+    R --> C --> S --> P --> OUT
     classDef llm fill:#ede9fe,stroke:#7c3aed,color:#4c1d95
     classDef rule fill:#dcfce7,stroke:#16a34a,color:#14532d
     class R,C,P llm
-    class S rule
+    class S,T rule
 ```
 
 | Bước | Dữ liệu chính đọc vào | Làm gì? | Output chính | Kiểm tra quan trọng |
 |---|---|---|---|---|
-| RESEARCH | company_name, company_description, website_text | Trích ngành, sản phẩm, nhóm khách hàng, đoạn bằng chứng và giới hạn | industry, products, customer_segments, evidence, limitations | Evidence phải là đoạn nguyên văn có trong text input |
+| COLLECT (Tavily) | Tên, hostname website nếu có và policy version; không có ICP | Lưu tối đa 5 nguồn, 4.000 ký tự/nguồn, 20.000 tổng ký tự | Query, source IDs/text/URL, warnings, reported usage | Một request/attempt; checkpoint và counter riêng, không là LLM call |
+| RESEARCH | company_name, text operator; Tavily thêm effective sources | Trích ngành, sản phẩm, nhóm khách hàng, đoạn bằng chứng và giới hạn | industry, products, customer_segments, evidence, limitations; Tavily thêm evidence_sources | Quote nguyên văn trong text; Tavily kiểm tra source ID và từng source content |
 | CLASSIFY | Research checkpoint + ICP | Nhận định phù hợp và thông tin thiếu | icp_match, matching_signals, missing_signals, reasoning | Tín hiệu phải dựa trên evidence Research; ICP không là bằng chứng công ty |
 | SCORE | Research + Classify | B2B/SaaS 40, ICP fit 30, SME 20, sản phẩm rõ 10 | score, qualification, rule_breakdown | Deterministic Python; HIGH ≥70, MEDIUM ≥40, còn lại LOW |
-| REPORT | Input công ty và các checkpoint đã có | Viết tóm tắt, điểm mạnh, rủi ro và câu hỏi tiếp theo | executive_summary, strengths, risks, next_questions, sources_note | JSON/schema validation; prompt yêu cầu giữ giới hạn và nêu nguồn operator |
+| REPORT | Input công ty và các checkpoint đã có | Viết tóm tắt, điểm mạnh, rủi ro và câu hỏi tiếp theo | executive_summary, strengths, risks, next_questions, sources_note; Tavily thêm sources/limitations | JSON/schema, URL đúng checkpoint, operator URL null; giữ giới hạn và không khẳng định xác minh độc lập |
 
-Giới hạn hiện tại: URL website chỉ là metadata, chưa tự tải trang; các bước LLM dùng
-OpenAI. Scoring còn thiên về từ khóa tiếng Anh. Kiểm tra quote chứng minh nguồn văn
+Manual mode giữ URL website làm metadata. Tavily mode dùng hostname để tìm nguồn,
+chỉ lưu snippet provider trả về, không trực tiếp tải trang; các bước LLM dùng OpenAI.
+Scoring còn thiên về từ khóa tiếng Anh. Kiểm tra quote chứng minh nguồn văn
 bản, không chứng minh doanh nghiệp thực tế đúng như văn bản nói. REPORT không có bộ
 kiểm tra độc lập bảo đảm mọi câu do model viết đều đúng sự thật.
 
@@ -173,13 +189,13 @@ flowchart TB
     end
     subgraph USECASE["Application"]
         APP["JobService / Workflow<br/>Điều phối use case"]
-        PORT["Repository / Publisher ports<br/>Hợp đồng cần được cung cấp"]
+        PORT["Repository / Publisher / Collector ports<br/>Hợp đồng cần được cung cấp"]
     end
     subgraph CORE["Domain"]
         DOMAIN["ResearchJob / ResearchStep<br/>Policy · schema output · scoring"]
     end
     subgraph ADAPTERS["Infrastructure"]
-        INFRA["SQLAlchemy / Celery / CrewAI / OpenAI<br/>Implementation cho DB, queue, model"]
+        INFRA["SQLAlchemy / Celery / CrewAI / OpenAI / Tavily<br/>Implementation cho DB, queue, model, collection"]
     end
     API -->|"Gọi use case"| APP
     APP -->|"Dùng quy tắc"| DOMAIN
@@ -233,7 +249,7 @@ Celery được nối vào async loop và dispose engine trước khi đóng loo
 | Khái niệm | Hiểu đơn giản | Tránh vấn đề gì? |
 |---|---|---|
 | Job | Một yêu cầu đánh giá doanh nghiệp | Gom input, trạng thái và kết quả của một lần đánh giá |
-| Step | Một công đoạn của job | Biết job đang dừng ở Research, Classify, Score hay Report |
+| Step | Một công đoạn của job | Biết job đang dừng ở Collect (nếu có), Research, Classify, Score hay Report |
 | Attempt | Một lần thử thực hiện step | Theo dõi số lần chạy, request ID, token, lỗi và chi phí |
 | Event | Mốc audit bền vững trong DB | Lần theo claim, bắt đầu request, checkpoint, lỗi và recovery |
 | Claim | Giành quyền xử lý step bằng cập nhật nguyên tử | Hạn chế hai worker cùng nhận quyền chạy một bước |
@@ -247,11 +263,11 @@ Celery được nối vào async loop và dispose engine trước khi đóng loo
 
 Không bảo đảm exactly-once invocation/billing với provider. Ví dụ provider đã trả kết
 quả nhưng worker crash trước commit: DB chưa có checkpoint, nhưng request có thể đã
-được tính phí. Đây là lý do các ca mơ hồ không được tự retry LLM.
+được tính phí. Đây là lý do các ca mơ hồ không được tự retry LLM hoặc COLLECT.
 
 ## 6. Hiện tại và lộ trình F001–F003
 
-Sơ đồ dưới đây là **thiết kế dự kiến**, chưa phải luồng đã triển khai.
+F001 đã triển khai dưới dạng mode tùy chọn; F002/F003 trong sơ đồ vẫn là thiết kế dự kiến.
 
 ```mermaid
 flowchart LR
@@ -272,12 +288,12 @@ flowchart LR
     P --> DB
     ADMIN -->|"Chỉ đọc qua use case / repository"| DB
     classDef planned fill:#f8fafc,stroke:#64748b,color:#334155,stroke-dasharray:5 5
-    class T,ROUTE,ADMIN planned
+    class ROUTE,ADMIN planned
 ```
 
 | Phần | Hiện có | Dự kiến bổ sung | Đặc tả |
 |---|---|---|---|
-| Thu thập nguồn | Người dùng cung cấp text; không browse | COLLECT gọi Tavily trước Research, lưu nguồn và checkpoint; giữ manual mode | [F001](../features/F001-tavily-collection.md) |
+| Thu thập nguồn | Manual bốn bước; Tavily mode có COLLECT trước Research, lưu text/URL và checkpoint | F001 đã triển khai; chưa có crawler trực tiếp hoặc deep research | [F001](../features/F001-tavily-collection.md), [vận hành](tavily-collection.vi.md) |
 | Provider LLM | Ba bước LLM gọi OpenAI | Profile/provider/model từng step, ví dụ Report dùng Ollama; snapshot cấu hình theo job | [F002](../features/F002-per-step-llm-providers.md) |
 | Admin | GET /api/v1/admin/metrics có Bearer token | List/filter/detail/events/attempts, API qua Swagger/Postman; docs/admin theo từng layer | [F003](../features/F003-admin-api-ddd.md) |
 
@@ -290,6 +306,7 @@ chi tiết theo code cuối cùng. Bản đồ này không thay thế các đặ
 | Bạn muốn hiểu gì? | Tài liệu |
 |---|---|
 | Setup và thử API | [README tiếng Việt](README.vi.md) |
+| Thu thập nguồn, provenance và recovery Tavily | [Tavily collection](tavily-collection.vi.md) |
 | Luồng thực thi và xử lý tình huống | [End to end](end-to-end.vi.md) |
 | DDD, DI, async và database | [Kiến trúc](architecture.vi.md) |
 | Các container/service và lệnh Compose | [Compose services](compose-services.vi.md) |

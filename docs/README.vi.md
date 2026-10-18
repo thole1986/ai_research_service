@@ -8,7 +8,7 @@ Muốn chạy riêng từng service: [Các file Compose và lệnh chạy tươn
 
 Tài liệu tiếng Việt tương ứng với [README chính](../README.md). Các lệnh bên dưới chạy từ thư mục gốc dự án. Phần cập nhật DDD, async, cấu hình PostgreSQL và pool nằm tại [kiến trúc và database](architecture.vi.md).
 
-Hệ thống nhận thông tin doanh nghiệp và chân dung khách hàng lý tưởng (ICP), xử lý bất đồng bộ rồi trả về báo cáo có dẫn chứng từ văn bản được cung cấp.
+Hệ thống nhận thông tin doanh nghiệp và chân dung khách hàng lý tưởng (ICP), xử lý bất đồng bộ rồi trả về báo cáo có dẫn chứng từ văn bản operator hoặc nguồn web được lưu qua Tavily.
 
 Luồng xử lý: **FastAPI → Redis/Celery → CrewAI/OpenAI**. SQLite local hoặc PostgreSQL lưu trạng thái nghiệp vụ, kết quả từng bước và lịch sử thực thi, truy cập qua SQLAlchemy async. Mã nguồn tách `domain`, `application`, `infrastructure` và API; chi tiết tại [tài liệu DDD](architecture.vi.md).
 
@@ -16,6 +16,7 @@ Luồng xử lý: **FastAPI → Redis/Celery → CrewAI/OpenAI**. SQLite local h
 
 | Bước | Chức năng | Cách thực hiện |
 |---|---|---|
+| `COLLECT` (chỉ Tavily mode) | Tìm và lưu nguồn web trước Research, tối đa một Search request mỗi attempt | Tavily REST API qua httpx async, không gọi LLM |
 | `RESEARCH` | Trích xuất ngành nghề, sản phẩm, nhóm khách hàng, dẫn chứng và hạn chế dữ liệu | CrewAI + OpenAI |
 | `CLASSIFY` | Đánh giá mức độ phù hợp với ICP, chỉ ra tín hiệu phù hợp và thông tin còn thiếu | CrewAI + OpenAI |
 | `SCORE` | Tính điểm và xếp hạng theo quy tắc công khai | Python, không gọi LLM |
@@ -23,7 +24,7 @@ Luồng xử lý: **FastAPI → Redis/Celery → CrewAI/OpenAI**. SQLite local h
 
 Mỗi bước lưu checkpoint riêng. Worker phải giành quyền xử lý bằng thao tác nguyên tử trong DB; lease giới hạn thời gian sở hữu, còn fencing token ngăn worker cũ ghi đè kết quả.
 
-Nguồn thông tin chỉ gồm mô tả doanh nghiệp và nội dung website do người dùng cung cấp. Địa chỉ website được lưu làm thông tin tham chiếu; hệ thống không tự truy cập hay thu thập website.
+Mặc định `collection_mode="manual"`: giữ bốn bước và chỉ dùng mô tả/nội dung website do người dùng cung cấp. Với `collection_mode="tavily"`, job chạy năm bước, bắt đầu bằng COLLECT; chỉ cần tên và ICP, website tùy chọn, mô tả có thể bỏ trống. ICP không được đưa vào query và không là evidence. Text operator có nguồn riêng, không tự gán cho URL website. Backend chỉ lưu text Tavily trả về, không trực tiếp tải các URL kết quả. Xem [hướng dẫn Tavily](tavily-collection.vi.md).
 
 ## 2. Chạy bằng Docker với Redis có sẵn
 
@@ -107,6 +108,10 @@ File `uv.lock` khóa phiên bản các dependency trực tiếp và gián tiếp
 | `CONTAINER_REDIS_URL` | Địa chỉ Redis mà các container ứng dụng sử dụng |
 | `OPENAI_API_KEY` | API key; chỉ lưu cục bộ trong `.env` |
 | `OPENAI_MODEL` | Model sử dụng cho các bước AI |
+| `TAVILY_API_KEY` | Mặc định rỗng; chỉ cần khi dùng `collection_mode="tavily"`; manual không cần key này |
+| `TAVILY_REQUEST_TIMEOUT_SECONDS` | Mặc định 30 giây, phải dương và nhỏ hơn lease TTL trên 10 giây |
+| `TAVILY_MAX_RESULTS` | Mặc định 5, phạm vi 1–5 nguồn web |
+| `COLLECT_MAX_ATTEMPTS` | Mặc định 2, bị giới hạn thêm bởi `MAX_STEP_ATTEMPTS`; bao gồm retry thủ công |
 | `ADMIN_TOKEN` | Token bảo vệ endpoint retry và metrics; để trống thì không thể truy cập các endpoint này |
 | `MAX_INPUT_CHARS` | Giới hạn tổng số ký tự đầu vào |
 | `MAX_OUTPUT_TOKENS_PER_STEP` | Giới hạn token đầu ra cho mỗi bước AI |
@@ -118,7 +123,7 @@ File `uv.lock` khóa phiên bản các dependency trực tiếp và gián tiếp
 | `LEASE_TTL_SECONDS` | Thời hạn quyền sở hữu bước; phải lớn hơn timeout theo điều kiện kiểm tra cấu hình |
 | `RECOVERY_SCAN_SECONDS` | Chu kỳ quét phục hồi, mặc định 60 giây |
 
-Không đưa `.env`, API key hoặc database vào mã nguồn hay chia sẻ chúng trong chat.
+Không đưa `.env`, API key hoặc database vào mã nguồn hay chia sẻ chúng trong chat. Trước khi chạy code cập nhật, dùng `alembic upgrade head` để áp dụng revision `26a1018_tavily_collection`. Job cũ tiếp tục là `manual-v1`, không bị thêm COLLECT hoặc thay checkpoint.
 
 ## 5. Ví dụ gọi API
 
@@ -141,7 +146,7 @@ Mỗi lượt demo mới đổi key; dùng lại key sẽ trả về job cũ. Kh
 đọc file bằng `-Encoding UTF8` và gửi bằng `System.Text.Encoding.UTF8.GetBytes` như ví dụ
 README chính. Cần API, Redis, database đã migrate và các worker/Beat hoạt động.
 
-Pipeline không truy cập URL; `website_text` trong ví dụ MISA là bản tóm tắt do người
+Các payload manual không truy cập URL; `website_text` trong ví dụ MISA là bản tóm tắt do người
 vận hành cung cấp, không phải trích nguyên văn. Scoring hiện nhận keyword tiếng Anh
 B2B/SaaS/SME nên không nên dùng điểm số của ví dụ tiếng Việt làm khẳng định về công ty
 thật. Mở `rule_breakdown`, `limitations`, `missing_signals` để giải thích kết quả;
@@ -178,7 +183,20 @@ Mỗi yêu cầu nghiệp vụ mới cần một `Idempotency-Key` riêng. Gửi
 | `422` | Dữ liệu hoặc độ dài đầu vào không hợp lệ |
 | `503` | Endpoint readiness không kết nối được dependency cần thiết |
 
-Kết quả truy vấn job chứa trạng thái, các bước theo thứ tự, số lần thực thi, thời gian UTC, lỗi đã được làm sạch và chi phí ước tính. Khi hoàn tất, trường `result` gồm `research`, `classify`, `score`, `report`.
+Kết quả truy vấn job chứa trạng thái, các bước theo thứ tự, số lần thực thi, thời gian UTC, lỗi đã được làm sạch và chi phí LLM ước tính. Khi hoàn tất, trường `result` gồm `research`, `classify`, `score`, `report`; Tavily mode thêm `collect`, mapping `research.evidence_sources` và danh sách URL `report.sources`.
+
+Để thử mode thu thập, gửi body dưới đây với key mới sau khi cấu hình `TAVILY_API_KEY`:
+
+```json
+{
+  "company_name": "Example Company",
+  "website": "https://example.com",
+  "icp": "B2B SaaS phục vụ SME tại Việt Nam",
+  "collection_mode": "tavily"
+}
+```
+
+Mỗi attempt COLLECT có thể phát sinh phí Tavily riêng. Chi tiết payload demo, giới hạn nguồn và xử lý lỗi tại [thu thập nguồn Tavily](tavily-collection.vi.md).
 
 ### Retry thủ công
 
@@ -198,6 +216,7 @@ Nội dung JSON:
 ```
 
 Chỉ được retry bước chưa hoàn thành đầu tiên đang ở `UNKNOWN` hoặc `NEEDS_REVIEW`, khi các bước phía sau vẫn ở `PENDING` và chưa vượt giới hạn số lần thực thi. Không retry bước đã hoàn thành hoặc đang chạy.
+Tavily mode chấp nhận thêm `step_name="COLLECT"` với cùng xác nhận phí trùng và trần collection riêng.
 
 Việc xác nhận đồng nghĩa bạn chấp nhận khả năng phát sinh phí trùng cho request cũ có kết quả không xác định. Retry vẫn chịu giới hạn số lần gọi và ngân sách. Nếu thay các giới hạn này, cần khởi động lại service; nếu checkpoint không còn phù hợp với prompt/cấu hình hiện tại, tạo job mới với key mới.
 
@@ -206,9 +225,9 @@ Việc xác nhận đồng nghĩa bạn chấp nhận khả năng phát sinh ph�
 | Endpoint | Mục đích |
 |---|---|
 | `GET /health` | Kiểm tra tiến trình API còn hoạt động |
-| `GET /ready` | Kiểm tra database đã migration và kết nối Redis; không gọi OpenAI |
+| `GET /ready` | Kiểm tra database đã migration và kết nối Redis; không gọi OpenAI/Tavily |
 | `GET /api/v1/research/jobs/{job_id}/events` | Đọc lịch sử sự kiện của job |
-| `GET /api/v1/admin/metrics` | Xem số lượng job/bước/sự kiện, lần gọi LLM, token và chi phí; yêu cầu token quản trị |
+| `GET /api/v1/admin/metrics` | Xem job/bước/sự kiện, lần gọi LLM, token và USD ước tính; collection calls/credits tách riêng; yêu cầu token quản trị |
 
 ## 6. Checkpoint, recovery và chi phí
 
@@ -217,7 +236,8 @@ Việc xác nhận đồng nghĩa bạn chấp nhận khả năng phát sinh ph�
 - Timeout hoặc crash khiến kết quả gọi LLM không rõ sẽ chuyển sang `UNKNOWN`/`NEEDS_REVIEW`. Hệ thống không tự gọi lại LLM trong trường hợp này. `REQUEST_STARTED` chỉ ghi nhận ý định gọi, không chứng minh request đã được xử lý hay tính phí.
 - Request bị từ chối rõ ràng với HTTP `429` được thử lại có giới hạn và tăng thời gian chờ theo cấp số nhân qua trạng thái DB. Retry của OpenAI SDK bị tắt; mỗi Crew có cổng giới hạn một SDK request để tránh các lần sửa định dạng hoặc lặp nội bộ phát sinh thêm lời gọi trả phí.
 - Trước khi gọi, hệ thống giữ lại một khoản chi phí ước tính từ prompt/schema, phần dự phòng và giới hạn đầu ra. Khi thành công, điều chỉnh theo usage; khi kết quả không rõ, vẫn giữ khoản ước tính. Đây là kiểm soát theo ước tính, không phải sổ thanh toán hay giới hạn USD cứng do nhà cung cấp bảo đảm.
-- Dẫn chứng nghiên cứu phải xuất hiện trong văn bản đầu vào. Tín hiệu phân loại phải trích từ dẫn chứng đó. Kiểm tra này xác nhận nguồn trích dẫn, không xác nhận thông tin doanh nghiệp là sự thật.
+- COLLECT ghi request intent/counter riêng, không tăng LLM calls hoặc giữ chỗ USD của LLM. Timeout/network/5xx/crash chưa rõ kết quả cần duyệt; checkpoint đã hoàn thành được dùng lại khi resume. Usage/credits chỉ ghi khi provider thực sự trả về, không mặc định chi phí là 0.
+- Dẫn chứng nghiên cứu phải xuất hiện trong nguồn hiệu lực. Tavily mode kiểm tra thêm `source_id` và quote nguyên văn trong đúng source; Report phải sao chép URL đã lưu và có limitations. Tín hiệu phân loại phải trích từ evidence. Kiểm tra này xác nhận nguồn trích dẫn, không xác nhận thông tin doanh nghiệp là sự thật.
 - Beat mặc định lập lịch quét lease hết hạn và tiếp tục job chờ mỗi 60 giây; dọn sự kiện cũ lúc **02:00 UTC, tức 09:00 giờ Việt Nam**. Cập nhật có điều kiện trong DB bảo vệ khi các lượt quét chạy chồng nhau.
 - Quét job chờ giúp khôi phục khi đã lưu DB nhưng chưa gửi được message tới Redis, kể cả crash sau checkpoint. Message trùng vẫn phải qua cổng claim trong DB.
 - Log chỉ ghi định danh, loại sự kiện/lỗi và số liệu sử dụng; không ghi toàn bộ đầu vào, prompt, response hay lỗi thô từ nhà cung cấp. Nội dung kết quả được lưu trong checkpoint DB và trả qua API. Telemetry CrewAI bị tắt.
@@ -244,7 +264,7 @@ Tổng điểm từ 0–100: `HIGH` khi ≥70, `MEDIUM` khi ≥40 và dưới 70
 .\.venv\Scripts\alembic check
 ```
 
-Test tự động không cần OpenAI API key và giả lập ranh giới nhà cung cấp. Có test sử dụng CrewAI thật với SDK được giả lập. Test Redis thật là tùy chọn; xem lệnh container bên dưới để chạy cùng bộ kiểm thử.
+Test tự động không cần OpenAI/Tavily API key và giả lập ranh giới nhà cung cấp. Có test sử dụng CrewAI thật với SDK được giả lập. Test Redis thật là tùy chọn; xem lệnh container bên dưới để chạy cùng bộ kiểm thử.
 
 ### Kiểm thử trong Linux container với Redis có sẵn
 
@@ -345,6 +365,8 @@ Langfuse; telemetry riêng của CrewAI vẫn tắt qua `CREWAI_TELEMETRY_DISABL
 Mỗi lượt thực thi tạo trace `company-research`, tra cứu qua metadata `job_id`.
 Bên dưới là span của từng step và generation `openai.chat.completions`, với
 `attempt_id`, model, thời gian, token, chi phí ước tính và mã lỗi đã lọc.
+COLLECT có span `external_collection` riêng, không có model/generation LLM;
+query, URL và text nguồn cũng chỉ được capture khi opt-in, không đưa vào metadata mặc định.
 Checkpoint được dùng lại có trạng thái `CHECKPOINT_HIT`, không gọi lại LLM.
 Retry/resume tạo trace thực thi mới, liên kết bằng cùng `job_id`.
 Mặc định không gửi company text, prompt hoặc output; muốn xem chúng trong Langfuse,
@@ -397,7 +419,7 @@ docker compose down
 | SQLite báo `database is locked` | Có worker chạy trùng hoặc DB nằm trên ổ mạng không |
 | Sửa `.env` nhưng hành vi chưa đổi | Tạo lại container hoặc khởi động lại các tiến trình chạy trực tiếp |
 
-Khi chạy local, JSON mẫu Acme với `website_text` rỗng vẫn hợp lệ: pipeline dùng
+Khi chạy local, JSON mẫu Acme manual với `website_text` rỗng vẫn hợp lệ: pipeline dùng
 `company_description` làm evidence và không tự tải nội dung URL `website`.
 `CLASSIFY` chọn nguyên văn các chuỗi evidence qua JSON Schema; validator phía server
 vẫn từ chối dẫn chứng bịa hoặc diễn đạt lại.

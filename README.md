@@ -1,9 +1,11 @@
 # AI Company Research & Lead Qualification
 
 FastAPI → Redis/Celery → CrewAI/OpenAI, with async SQLite or PostgreSQL as the workflow source of truth.
-Each job runs **RESEARCH → CLASSIFY → SCORE → REPORT**. Every step has an atomic claim,
-lease, fencing token, checkpoint and attempt audit. SCORE is deterministic Python.
-Company descriptions and optional website text are the only evidence; URLs are metadata.
+By default, jobs run **RESEARCH → CLASSIFY → SCORE → REPORT** using operator-supplied text.
+Optional `collection_mode: "tavily"` adds **COLLECT** first to save Tavily web snippets before
+analysis. Every step has an atomic claim, lease, fencing token, checkpoint and attempt audit.
+SCORE is deterministic Python; COLLECT makes one Search request per attempt without an LLM.
+Web quotes retain source IDs and URLs; operator text remains a separate source without an assumed URL.
 
 The code follows a pragmatic DDD layout with `research` packages inside `domain`,
 `application`, `infrastructure` and `api`. Admin and health have separate API routers.
@@ -18,6 +20,7 @@ Vietnamese guides: [README tiếng Việt](docs/README.vi.md),
 [DDD, async và PostgreSQL](docs/architecture.vi.md).
 
 Full service integration walkthrough: [Luồng end to end và xử lý tình huống](docs/end-to-end.vi.md).
+Collection setup, provenance and recovery: [Thu thập nguồn Tavily](docs/tavily-collection.vi.md).
 
 Each service also has a standalone `docker-compose.<service>.yml` file.
 See [Chạy Compose riêng từng service](docs/compose-services.vi.md) for commands and startup order.
@@ -47,6 +50,8 @@ host components; Compose uses `CONTAINER_DATABASE_URL` when set. `DB_POOL_MODE=n
 `NullPool`; pool size/overflow options apply only to pooled PostgreSQL engines. Alembic uses
 the same async drivers and a short-lived NullPool engine. Run migrations before starting services.
 Existing SQLite files remain supported; changing backend does not copy existing data.
+Run `alembic upgrade head` to apply revision `26a1018_tavily_collection` before starting
+the updated API/workers. Existing jobs remain `manual-v1` with their original four steps and checkpoints.
 
 ## Start with Docker and your existing Redis
 
@@ -114,6 +119,28 @@ Invoke-RestMethod "http://localhost:8000/api/v1/research/jobs/$($job.job_id)"
 Invoke-RestMethod "http://localhost:8000/api/v1/research/jobs/$($job.job_id)/events"
 ```
 
+For collection, use a new idempotency key and this body; `company_description` is optional:
+
+```json
+{
+  "company_name": "Example Company",
+  "website": "https://example.com",
+  "icp": "B2B SaaS serving SMEs in Vietnam",
+  "collection_mode": "tavily"
+}
+```
+
+Set `TAVILY_API_KEY` locally to use this mode. Manual mode remains the default and needs no
+Tavily key or collector. Each collection attempt can incur a separate Tavily charge; LLM USD
+estimates exclude it. See the [collection guide](docs/tavily-collection.vi.md) for the demo payload.
+
+| Setting | Default / meaning |
+|---|---|
+| `TAVILY_API_KEY` | Empty; required only for Tavily mode |
+| `TAVILY_REQUEST_TIMEOUT_SECONDS` | `30`; positive request timeout, below lease TTL by more than 10 seconds |
+| `TAVILY_MAX_RESULTS` | `5`; allowed range `1–5` |
+| `COLLECT_MAX_ATTEMPTS` | `2`; capped by `MAX_STEP_ATTEMPTS`, including admin retries |
+
 ### Demo payloads for the team
 
 After cloning, complete the local/Docker setup above and check `GET /ready`.
@@ -132,7 +159,8 @@ The MISA payload is an operator-written summary, checked on **2026-10-17**, of
 [product overview](https://helpcrm.misa.vn/kb/tinh-nang-noi-bat-cua-phan-mem-quan-ly-ban-hang-misa-amis-crm/).
 It is not a verbatim website extract or an exhaustive company profile. The other three
 companies are synthetic fixtures; their `example.com` URLs are placeholders.
-The pipeline only analyzes supplied text and does not fetch the `website` URL.
+These manual payloads analyze only supplied text. Tavily mode adds stored search snippets;
+the backend does not fetch result URLs directly.
 
 **Postman:** use `POST http://localhost:8000/api/v1/research/jobs`, set
 `Content-Type: application/json` and `Idempotency-Key: demo-misa-001`, then paste a
@@ -178,7 +206,8 @@ New requests return 202. The same canonical payload/key returns 200 and the orig
 changed payload with the same key returns 409. Invalid input returns 422, body size overflow
 413, unknown jobs 404. Poll results contain ordered step outputs, attempts, UTC timestamps,
 sanitized error code and estimated cost. Completed jobs include `result.research`,
-`result.classify`, `result.score`, `result.report`.
+`result.classify`, `result.score`, `result.report`. Collection jobs also expose `result.collect`,
+including the stored source text, and structured evidence/citations in Research and Report.
 
 Manual retry requires `Authorization: Bearer <ADMIN_TOKEN>` and
 `{"step_name":"RESEARCH","acknowledge_possible_duplicate_charge":true}` at
@@ -186,10 +215,11 @@ Manual retry requires `Authorization: Bearer <ADMIN_TOKEN>` and
 step can be reset, with no completed downstream steps and below the attempt ceiling.
 Completed/running steps cannot be retried. Increasing budget/call limits requires restarting
 services. Configuration/prompt mismatch requires a new job and idempotency key.
+Collection jobs also accept `step_name: "COLLECT"` under the same acknowledgement and attempt rules.
 
-`GET /health` is liveness. `GET /ready` checks the migrated database and Redis, never OpenAI.
+`GET /health` is liveness. `GET /ready` checks the migrated database and Redis, without calling providers.
 `GET /api/v1/admin/metrics` uses the same bearer token and returns job/step/event counts,
-attempted LLM calls, tokens and cost estimates.
+attempted LLM calls, tokens, LLM cost estimates and separate collection calls/reported credits.
 
 ## Correctness and cost policy
 
@@ -208,6 +238,8 @@ provider and drains spans off the event loop with a bounded timeout after each j
 CrewAI telemetry remains disabled. Tests use the real Langfuse SDK with an in-memory
 exporter, without contacting Langfuse or OpenAI. See the
 [Vietnamese setup guide](docs/README.vi.md#langfuse-tùy-chọn) for details.
+COLLECT is a separate `external_collection` span, with no LLM model/generation metadata;
+query, source URLs and snippet content follow the same opt-in capture policy.
 
 With content capture enabled, the root observation contains the submitted company JSON
 and the execution outcome (`status`, validated `result`, sanitized `error`). Each step
@@ -230,8 +262,12 @@ old traces cannot recover content that was never captured.
   allowance and output ceiling. Reconcile with usage on success; keep reservations for unknown
   outcomes. Call and attempt ceilings include manual retries. This is a best-effort estimate,
   not a billing ledger or provider-enforced hard dollar cap.
-- Research quotes must occur in supplied text; classification signals must quote those
-  checkpoints. This checks provenance, not factual truth. Scoring rules: B2B SaaS 40, ICP fit
+- COLLECT has a separate request-start audit/counter. Confirmed 429s use bounded DB backoff;
+  ambiguous timeouts, network errors, 5xx or dispatch crashes need admin review. A completed
+  COLLECT checkpoint is reused on resume. Reported Tavily credits remain separate from LLM USD.
+- Research quotes must occur in effective sources; Tavily jobs also validate every quote's
+  source ID and exact source text, and report citations must copy stored URLs. Classification
+  signals quote those checkpoints. This checks provenance, not factual truth. Scoring rules: B2B SaaS 40, ICP fit
   30, SME evidence 20, product 10. HIGH ≥70, MEDIUM ≥40, otherwise LOW.
 - Beat schedules stale scan and pending resume every 60s, event retention cleanup at 02:00 UTC.
   Overlapping scans use conditional updates. Duplicate broker messages still pass the claim gate.
@@ -249,7 +285,7 @@ old traces cannot recover content that was never captured.
 .\.venv\Scripts\alembic check
 ```
 
-Automated tests need no OpenAI key and mock only the provider boundary. They include an
+Automated tests need no OpenAI or Tavily key and mock the provider boundaries. They include an
 actual single-task Crew running against a mocked SDK. See `docs/verification.md` for the
 failure matrix and execution evidence. Real-provider smoke tests are explicit/manual only.
 

@@ -1,5 +1,53 @@
 # Plan review and verification
 
+## F001 Tavily collection — 2026-10-18
+
+Implementation and operations: [Tavily guide](tavily-collection.vi.md).
+Automated provider calls use HTTP/SDK mocks, including an API → real Tavily adapter
+with `httpx.MockTransport` → actual CrewAI with mocked OpenAI → persisted five-step
+result test. No paid Tavily/OpenAI smoke calls were made.
+
+| Area | Coverage |
+|---|---|
+| Mode/default compatibility | `test_collection_contracts`, `test_manual_idempotency_and_input_cap_ignore_new_mode_default`, existing API/workflow suites |
+| REST contract and normalization | `test_tavily`: one POST, no retries/redirects, basic/max five, query independent of ICP, URL/dedup/domain/text limits, unknown usage, sanitized errors |
+| Provenance and reports | `test_collection_contracts`: quote substring and source IDs, operator URL=None, fabricated citations rejected, legacy schema stability, strict LLM schemas |
+| Five-step integration | `test_collection_api_through_actual_crew_and_persisted_sources`, partial GET `result.collect` when downstream stops |
+| Recovery and costs | `test_resume_keeps_collection_checkpoint`, crash/request/response hooks, bounded 429, admin auth/ack/ceiling, intent separate from LLM reservation |
+| Concurrency and fencing | Collection repository atomic claim/intent, duplicate workflow messages, stale completion, independent durable request ceiling |
+| Telemetry/lifecycle | COLLECT span type, capture off/on, sanitized logs, manual collector not constructed, async HTTP client closed on success/error |
+| Legacy migrations | Populated SQLite old revision → head, schema check and default idempotency; real PostgreSQL pending/partial/completed replay |
+
+Baseline: `.venv\Scripts\pytest -q --basetemp=data/pytest-f001-baseline`:
+**75 passed, 37 skipped**. After F001, SQLite/default environment:
+`.venv\Scripts\pytest -q --basetemp=data/pytest-f001-full`:
+**177 passed, 70 skipped**; PostgreSQL/Redis optional variants were not enabled in
+that run. Isolated real PostgreSQL 16 scoped integration run: **85 passed, 0 skipped**.
+
+Final full suite with disposable **PostgreSQL 16.15 + Redis 7.4.11**:
+**247 passed, 0 skipped**, 594 dependency deprecation warnings, 58.67 seconds.
+Both Redis/Celery broker E2E cases ran. Reproduce with isolated test services:
+
+```powershell
+$env:TEST_POSTGRES_URL = '<isolated PostgreSQL async DSN>'
+$env:RUN_REDIS_E2E = '1'
+$env:TEST_REDIS_URL = '<isolated Redis URL>/15'
+.\.venv\Scripts\python -m pytest -q --disable-warnings --basetemp data/f001-audit-full-pytest
+```
+
+Real PostgreSQL migration checks preserved pending, partially completed and completed
+legacy manual jobs. Replay used respectively 3, 2 and 0 fake LLM calls, no COLLECT;
+`alembic check` found no new upgrade operations. Application databases were not modified.
+The readiness probe now checks required model columns, so pre-F001 schemas do not
+incorrectly pass `/ready`.
+SQLite/PostgreSQL `alembic check` passed without schema drift. Full-repository
+`ruff check .`, `ruff format --check .` (102 files), and `git diff --check` passed.
+Temporary test containers were removed after verification.
+
+Provider snippets remain unverified. Prompt contract tests check separation of source
+data from instructions; they do not establish absolute prompt-injection resistance.
+Collection credits reflect reported checkpointed usage, not an exact billing ledger.
+
 ## Async + DDD + PostgreSQL revision
 
 The original implementation evidence below describes the initial synchronous SQLite MVP.

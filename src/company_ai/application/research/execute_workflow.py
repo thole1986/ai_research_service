@@ -2,16 +2,20 @@ import time
 
 from pydantic import ValidationError
 
-from company_ai.application.research.ports import ResearchRepository, WorkflowObserver
+from company_ai.application.research.ports import (
+    CompanySourceCollector,
+    ResearchRepository,
+    WorkflowObserver,
+)
 from company_ai.application.research.prompts import (
-    INSTRUCTIONS,
-    PROMPT_VERSION,
-    SCHEMA_VERSION,
     SYSTEM,
+    instructions,
+    prompt_versions,
     provider_schema,
     reserve_cost,
 )
 from company_ai.application.research.step_executor import inject_failure, keep_lease
+from company_ai.domain.research.collection import CollectionInput, effective_sources
 from company_ai.domain.research.contracts import (
     AIResult,
     InvalidOutput,
@@ -20,38 +24,64 @@ from company_ai.domain.research.contracts import (
     output_error_category,
 )
 from company_ai.domain.research.hashing import digest
-from company_ai.domain.research.outputs import SCHEMAS
+from company_ai.domain.research.outputs import schema_for
 from company_ai.domain.research.policies import validate_evidence
 from company_ai.domain.research.scoring import score
 from company_ai.observability import NoOpObserver, log_event
 
 
-def step_payload(name, job, outputs):
+def step_payload(name, job, outputs, settings=None):
+    if name == "COLLECT":
+        return CollectionInput(
+            company_name=job.input_json["company_name"],
+            website=job.input_json.get("website"),
+            max_results=settings.tavily_max_results if settings else 5,
+        ).as_dict()
     if name == "RESEARCH":
-        return {
-            key: job.input_json[key]
+        payload = {
+            key: job.input_json.get(key, "")
             for key in ("company_name", "company_description", "website_text")
         }
+        if "COLLECT" in outputs:
+            payload["sources"] = effective_sources(job.input_json, outputs["COLLECT"])
+            payload["collection"] = {
+                key: outputs["COLLECT"][key]
+                for key in ("collection_version", "provider", "warnings")
+            }
+        return payload
     if name == "CLASSIFY":
         return {"research": outputs["RESEARCH"], "icp": job.input_json["icp"]}
     if name == "SCORE":
         return {"research": outputs["RESEARCH"], "classification": outputs["CLASSIFY"]}
-    return {"company": job.input_json, "checkpoints": outputs.copy()}
+    payload = {"company": job.input_json, "checkpoints": outputs.copy()}
+    if "COLLECT" in outputs:
+        payload["sources"] = effective_sources(job.input_json, outputs["COLLECT"])
+    return payload
 
 
 def input_hash(name, payload, settings):
+    if name == "COLLECT":
+        return digest(
+            {
+                "step": name,
+                "payload": payload,
+                "schema": schema_for(name, payload).model_json_schema(),
+                "execution_type": "external_collection",
+            }
+        )
+    prompt_version, schema_version = prompt_versions(payload)
     identity = {
         "step": name,
         "payload": payload,
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema_version,
         "schema": provider_schema(name, payload),
     }
     if name != "SCORE":
         identity.update(
             model=settings.openai_model,
             temperature=settings.llm_temperature,
-            prompt_version=PROMPT_VERSION,
-            prompt=SYSTEM + INSTRUCTIONS[name],
+            prompt_version=prompt_version,
+            prompt=SYSTEM + instructions(name, payload),
             max_output_tokens=settings.max_output_tokens_per_step,
             max_agent_iterations=settings.max_agent_iterations,
             timeout=settings.llm_request_timeout_seconds,
@@ -68,6 +98,7 @@ async def run_workflow(
     adapter: LLMAdapter,
     settings,
     observer: WorkflowObserver | None = None,
+    collector: CompanySourceCollector | None = None,
 ):
     observer = observer or NoOpObserver()
     with observer.span(
@@ -75,7 +106,7 @@ async def run_workflow(
         metadata={"job_id": job_id},
         session_id=job_id,
     ) as workflow:
-        await _run_workflow(job_id, repo, adapter, settings, observer, workflow)
+        await _run_workflow(job_id, repo, adapter, settings, observer, workflow, collector)
 
 
 def _record_outcome(workflow, job_id, status, outputs, *, error_code=None, level="DEFAULT"):
@@ -92,7 +123,7 @@ def _record_outcome(workflow, job_id, status, outputs, *, error_code=None, level
     )
 
 
-async def _run_workflow(job_id, repo, adapter, settings, observer, workflow):
+async def _run_workflow(job_id, repo, adapter, settings, observer, workflow, collector):
     job, steps = await repo.get_job(job_id)
     if not job:
         _record_outcome(workflow, job_id, "JOB_NOT_FOUND", {}, level="WARNING")
@@ -112,20 +143,29 @@ async def _run_workflow(job_id, repo, adapter, settings, observer, workflow):
     outputs = {}
     for step in steps:
         name = step.step_name
-        payload = step_payload(name, job, outputs)
+        payload = step_payload(name, job, outputs, settings)
         hashed = input_hash(name, payload, settings)
+        prompt_version, schema_version = prompt_versions(payload)
         metadata = {
             "job_id": job_id,
             "step_name": name,
             "input_hash": hashed,
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": payload["schema_version"] if name == "COLLECT" else schema_version,
             "checkpoint_hit": step.status == "COMPLETED",
-            "execution_type": "rule_based" if name == "SCORE" else "llm",
+            "execution_type": (
+                "external_collection"
+                if name == "COLLECT"
+                else "rule_based"
+                if name == "SCORE"
+                else "llm"
+            ),
         }
         metadata.update(
-            {"rules_version": "b2b-saas-sme-v1"}
+            {"provider": "tavily"}
+            if name == "COLLECT"
+            else {"rules_version": "b2b-saas-sme-v1"}
             if name == "SCORE"
-            else ({"prompt_version": PROMPT_VERSION, "model": settings.openai_model})
+            else ({"prompt_version": prompt_version, "model": settings.openai_model})
         )
         if step.status == "COMPLETED":
             if step.input_hash != hashed or step.output_hash != digest(step.output_json):
@@ -162,7 +202,20 @@ async def _run_workflow(job_id, repo, adapter, settings, observer, workflow):
         try:
             with observer.span(name, metadata=metadata, input=payload) as observation:
                 async with keep_lease(repo, claim, settings):
-                    if name == "SCORE":
+                    if name == "COLLECT":
+                        if collector is None:
+                            raise InvalidOutput("COLLECT_NOT_CONFIGURED")
+                        if not await repo.collection_request_started(claim):
+                            observation.update(status_message="COLLECTION_REQUEST_NOT_STARTED")
+                            _record_outcome(
+                                workflow, job_id, "COLLECTION_REQUEST_NOT_STARTED", outputs
+                            )
+                            return
+                        log_event("COLLECTION_REQUEST_STARTED", **fields)
+                        inject_failure(settings, name, "request_started")
+                        result = await collector.collect(CollectionInput(**payload))
+                        inject_failure(settings, name, "response")
+                    elif name == "SCORE":
                         result = AIResult(score(outputs["RESEARCH"], outputs["CLASSIFY"]))
                     else:
                         reserve = reserve_cost(name, payload, settings)
@@ -175,14 +228,25 @@ async def _run_workflow(job_id, repo, adapter, settings, observer, workflow):
                         result = await adapter.execute(name, payload)
                         inject_failure(settings, name, "response")
                     try:
-                        validated = SCHEMAS[name].model_validate(result.output).model_dump()
+                        validated = (
+                            schema_for(name, payload).model_validate(result.output).model_dump()
+                        )
+                        if name == "COLLECT" and not validated["sources"]:
+                            if not effective_sources(job.input_json, validated):
+                                raise InvalidOutput("COLLECT_NO_USABLE_SOURCES")
+                            if "NO_USABLE_WEB_SOURCES" not in validated["warnings"]:
+                                validated["warnings"].append("NO_USABLE_WEB_SOURCES")
                         validate_evidence(name, validated, payload)
                     except (ValidationError, InvalidOutput):
                         # Retain rejected output for diagnosis without checkpointing it.
                         observation.update(output=result.output, status_message="OUTPUT_REJECTED")
                         raise
                     cost = None
-                    if result.tokens_input is not None and result.tokens_output is not None:
+                    if (
+                        isinstance(result, AIResult)
+                        and result.tokens_input is not None
+                        and result.tokens_output is not None
+                    ):
                         cost = (
                             result.tokens_input * settings.input_usd_per_million
                             + result.tokens_output * settings.output_usd_per_million
@@ -196,13 +260,24 @@ async def _run_workflow(job_id, repo, adapter, settings, observer, workflow):
                         return
                     outputs[name] = validated
                     observation.update(output=validated, status_message="CHECKPOINTED")
+                    usage = (
+                        {
+                            "source_count": len(validated["sources"]),
+                            "collection_usage": validated.get("usage"),
+                            "collection_credits": validated.get("credits"),
+                        }
+                        if name == "COLLECT"
+                        else {
+                            "tokens_input": result.tokens_input,
+                            "tokens_output": result.tokens_output,
+                            "estimated_cost_usd": cost,
+                        }
+                    )
                     log_event(
                         "STEP_CHECKPOINTED",
                         **fields,
                         duration_ms=round((time.perf_counter() - started) * 1000),
-                        tokens_input=result.tokens_input,
-                        tokens_output=result.tokens_output,
-                        estimated_cost_usd=cost,
+                        **usage,
                     )
         except SafeFailure:
             await repo.safe_retry(claim)
@@ -218,7 +293,7 @@ async def _run_workflow(job_id, repo, adapter, settings, observer, workflow):
             return
         except (ValidationError, InvalidOutput) as exc:
             category = (
-                "INVALID_STRUCTURED_OUTPUT"
+                ("COLLECT_INVALID_RESPONSE" if name == "COLLECT" else "INVALID_STRUCTURED_OUTPUT")
                 if isinstance(exc, ValidationError)
                 else output_error_category(exc)
             )
@@ -233,7 +308,11 @@ async def _run_workflow(job_id, repo, adapter, settings, observer, workflow):
             await repo.fail(
                 claim,
                 status,
-                "DETERMINISTIC_FAILURE" if name == "SCORE" else "AMBIGUOUS_PROVIDER_OUTCOME",
+                "DETERMINISTIC_FAILURE"
+                if name == "SCORE"
+                else "COLLECT_AMBIGUOUS_PROVIDER_OUTCOME"
+                if name == "COLLECT"
+                else "AMBIGUOUS_PROVIDER_OUTCOME",
             )
             _record_outcome(
                 workflow,
@@ -242,7 +321,11 @@ async def _run_workflow(job_id, repo, adapter, settings, observer, workflow):
                 outputs,
                 error_code="DETERMINISTIC_FAILURE"
                 if name == "SCORE"
-                else ("AMBIGUOUS_PROVIDER_OUTCOME"),
+                else (
+                    "COLLECT_AMBIGUOUS_PROVIDER_OUTCOME"
+                    if name == "COLLECT"
+                    else "AMBIGUOUS_PROVIDER_OUTCOME"
+                ),
                 level="ERROR",
             )
             log_event("STEP_STOPPED", **fields, error_category=status)

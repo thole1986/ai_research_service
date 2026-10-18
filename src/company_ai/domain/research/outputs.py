@@ -48,9 +48,42 @@ class ReportOutput(StrictOutput):
     sources_note: Short
 
 
+class EvidenceSource(StrictOutput):
+    quote: Short
+    source_id: Short
+
+
+class ResearchCollectedOutput(ResearchOutput):
+    evidence_sources: Annotated[list[EvidenceSource], Field(max_length=12)]
+
+
+class ReportSource(StrictOutput):
+    source_id: Short
+    url: str | None
+
+
+class ReportCollectedOutput(ReportOutput):
+    sources: Annotated[list[ReportSource], Field(max_length=7)]
+    limitations: Annotated[Items, Field(min_length=1)]
+
+
 SCHEMAS = {
     "RESEARCH": ResearchOutput,
     "CLASSIFY": ClassificationOutput,
     "SCORE": ScoreOutput,
     "REPORT": ReportOutput,
 }
+
+
+def schema_for(step: str, payload: dict):
+    """Select new contracts explicitly; preserve every legacy schema unchanged."""
+    if step == "COLLECT":
+        from company_ai.domain.research.collection import CollectOutput
+
+        return CollectOutput
+    if "sources" in payload:
+        if step == "RESEARCH":
+            return ResearchCollectedOutput
+        if step == "REPORT":
+            return ReportCollectedOutput
+    return SCHEMAS[step]

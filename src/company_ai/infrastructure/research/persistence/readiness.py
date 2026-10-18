@@ -9,4 +9,4 @@ async def research_database_ready(database: Database) -> None:
     # Context-specific schema probes belong to the adapter, not shared DB plumbing.
     async with database.session() as session:
         for model in (Job, Step, Attempt, Event):
-            await session.execute(select(model.id).limit(1))
+            await session.execute(select(model).limit(1))
