@@ -1,5 +1,25 @@
 # Plan review and verification
 
+## F003 admin research API — 2026-10-18
+
+Implementation and operations: [Admin API and DDD walkthrough](admin/README.md).
+Read-only admin metrics/jobs/detail/events/attempts use a separate application port,
+request-scoped SQLAlchemy reader, explicit response projections and Swagger Bearer auth.
+No new domain policy, migration, index, provider call or dashboard was added.
+
+Full suite on Python 3.13.13 with SQLite, isolated PostgreSQL **16.15** and Redis
+**7.4.11**: **488 passed, 0 skipped**, 1244 dependency deprecation warnings, 122.24s.
+Admin HTTP tests alone: **20 passed** across both database backends. Tests cover auth
+before reads, 422/404/empty history, stable bounded pagination, literal Unicode
+search, UTC ranges, safe event/error/metadata mapping, nullable usage, detached DTOs,
+per-request sessions, metrics compatibility and unchanged rows/leases after all GETs.
+Public API, retry, collection, provider-routing and Redis/Celery regressions passed.
+
+`ruff check .`, `ruff format --check .`, `git diff --check` passed. SQLite and a
+separate disposable PostgreSQL database passed `alembic upgrade head` + `alembic check`
+with no new upgrade operations. No application database or existing Redis queue was used;
+no real paid provider smoke was run. See [detailed evidence and limitations](admin/07-testing-troubleshooting.md).
+
 ## F002 per-step LLM providers — 2026-10-18
 
 Operations: [LLM routing](llm-routing.vi.md). OpenAI remains the default; Claude

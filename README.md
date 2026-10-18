@@ -24,6 +24,9 @@ entrypoints bridge into an event loop with an engine disposed before that loop c
 Vietnamese guides: [README tiếng Việt](docs/README.vi.md),
 [DDD, async và PostgreSQL](docs/architecture.vi.md).
 
+Admin operations and layer-by-layer DDD walkthrough:
+[Admin research API](docs/admin/README.md) (Swagger/Postman, read-only, Bearer token).
+
 Full service integration walkthrough: [Luồng end to end và xử lý tình huống](docs/end-to-end.vi.md).
 Collection setup, provenance and recovery: [Thu thập nguồn Tavily](docs/tavily-collection.vi.md).
 
@@ -225,6 +228,9 @@ Collection jobs also accept `step_name: "COLLECT"` under the same acknowledgemen
 `GET /health` is liveness. `GET /ready` checks the migrated database and Redis, without calling providers.
 `GET /api/v1/admin/metrics` uses the same bearer token and returns job/step/event counts,
 attempted LLM calls, tokens, LLM cost estimates and separate collection calls/reported credits.
+Admin also supports paginated `GET /api/v1/admin/jobs`, job detail, `/events` and
+`/attempts`, with safe saved execution metadata. These reads never enqueue work or call
+providers. See the [admin API guide](docs/admin/05-api.md) for filters and Swagger authorization.
 
 ## Correctness and cost policy
 

@@ -3,6 +3,10 @@
 F002 hỗ trợ OpenAI, Claude (Anthropic) và Ollama theo từng bước, với snapshot bất biến
 cho mỗi job. Mặc định vẫn OpenAI; không cần cài Ollama. Xem [cấu hình LLM routing](llm-routing.vi.md).
 
+F003 có API admin chỉ đọc qua Swagger/Postman: metrics → tìm job → detail → events/attempts,
+được bảo vệ bằng Bearer token. Xem [hướng dẫn từng layer DDD và end to end](admin/README.md).
+Đọc job có sẵn không enqueue hoặc gọi LLM/Tavily.
+
 Xem [Bản đồ hệ thống: sơ đồ, thành phần và luồng DDD](system-map.vi.md) để nắm tổng quan trước khi đọc code.
 
 Giải thích chi tiết từ API đến báo cáo, các service tích hợp và cách xử lý lỗi: [Luồng end to end](end-to-end.vi.md).

@@ -1,6 +1,6 @@
 # F003 — Admin research API end to end và tài liệu DDD từng layer
 
-- Trạng thái: READY — chưa triển khai.
+- Trạng thái: IMPLEMENTED — 2026-10-18.
 - Ngày tạo: 2026-10-17.
 - Phạm vi người dùng xác nhận: viết đặc tả trước; API qua Swagger/Postman, không dashboard.
 - Yêu cầu bắt buộc khi triển khai: sau mỗi layer hoàn thành, viết tài liệu giải thích
@@ -278,18 +278,18 @@ Hướng dẫn HTTP dùng PowerShell UTF-8 và Postman:
 
 ## 9. Checklist triển khai, có tài liệu sau mỗi layer
 
-- [ ] Đọc hướng dẫn/code hiện tại, ghi baseline và trạng thái F001/F002.
-- [ ] Tạo docs/admin/README.md với scope, lộ trình và trạng thái chưa hoàn thành.
-- [ ] Rà domain boundaries/policy; chỉ sửa khi cần → viết 01-domain.md.
-- [ ] Application DTOs/ports/use cases, unit tests → viết 02-application.md.
-- [ ] Infrastructure reader/mapping/query tests → viết 03-infrastructure.md.
-- [ ] Bootstrap/DI/lifecycle và dependency override tests → viết 04-bootstrap-di.md.
-- [ ] API schemas/router/auth/OpenAPI, HTTP tests → viết 05-api.md.
-- [ ] E2E HTTP→DB thật qua ASGI fixtures, không provider calls → viết 06-end-to-end.md.
-- [ ] Chạy validation/review auth/data exposure/query bounds → viết 07-testing-troubleshooting.md.
-- [ ] Kiểm tra links, ví dụ, sơ đồ đúng tên code cuối cùng; cập nhật docs/admin/README.md.
-- [ ] Link docs/admin/ từ README/tài liệu tiếng Việt phù hợp.
-- [ ] Cập nhật features index/F003 status và bằng chứng hoàn thành.
+- [x] Đọc hướng dẫn/code hiện tại, ghi baseline và trạng thái F001/F002.
+- [x] Tạo docs/admin/README.md với scope, lộ trình và trạng thái chưa hoàn thành.
+- [x] Rà domain boundaries/policy; chỉ sửa khi cần → viết 01-domain.md.
+- [x] Application DTOs/ports/use cases, unit tests → viết 02-application.md.
+- [x] Infrastructure reader/mapping/query tests → viết 03-infrastructure.md.
+- [x] Bootstrap/DI/lifecycle và dependency override tests → viết 04-bootstrap-di.md.
+- [x] API schemas/router/auth/OpenAPI, HTTP tests → viết 05-api.md.
+- [x] E2E HTTP→DB thật qua ASGI fixtures, không provider calls → viết 06-end-to-end.md.
+- [x] Chạy validation/review auth/data exposure/query bounds → viết 07-testing-troubleshooting.md.
+- [x] Kiểm tra links, ví dụ, sơ đồ đúng tên code cuối cùng; cập nhật docs/admin/README.md.
+- [x] Link docs/admin/ từ README/tài liệu tiếng Việt phù hợp.
+- [x] Cập nhật features index/F003 status và bằng chứng hoàn thành.
 
 Trong tiến trình implementation, cập nhật ngắn cho người dùng layer vừa hoàn thành,
 file docs tương ứng và bước tiếp theo. Không báo hoàn thành layer chỉ vì đã tạo file rỗng.
@@ -332,5 +332,41 @@ Không có dashboard hoặc chức năng mutation ngoài scope.
 
 ## 12. Bằng chứng hoàn thành
 
-Chưa triển khai. Khi hoàn thành ghi ngày, endpoint/files chính, link từng tài liệu layer,
-checks và kết quả thực tế, migration nếu có, cấu hình/restart cần thiết và giới hạn còn lại.
+Hoàn thành ngày **2026-10-18**. F001/F002 đã được triển khai trước F003; admin giữ được
+COLLECT, partial results, provider/model/pricing metadata đã lưu và legacy jobs.
+
+Năm endpoint được bảo vệ bằng Bearer: GET `/api/v1/admin/metrics`, `/jobs`,
+`/jobs/{job_id}`, `/jobs/{job_id}/events`, `/jobs/{job_id}/attempts`.
+Application có `admin_queries.py`, `admin_ports.py`, `admin_service.py`; infrastructure
+có `admin_reader.py`, `admin_mapping.py`, metrics helper chung; API có schemas và
+dependency contracts, bootstrap binding request-scoped AsyncSession. Không sửa domain
+policy, thêm dashboard hay mutation. GET không enqueue/gọi provider hoặc thay đổi rows.
+
+Tài liệu đã được viết sau từng phase:
+[Tổng quan](../docs/admin/README.md), [Domain](../docs/admin/01-domain.md),
+[Application](../docs/admin/02-application.md),
+[Infrastructure](../docs/admin/03-infrastructure.md),
+[Bootstrap/DI](../docs/admin/04-bootstrap-di.md), [API](../docs/admin/05-api.md),
+[End to end](../docs/admin/06-end-to-end.md),
+[Testing/troubleshooting](../docs/admin/07-testing-troubleshooting.md).
+
+Baseline scoped: **3 passed, 2 skipped**. Validation cuối trên Python 3.13.13 với
+SQLite, PostgreSQL **16.15**, Redis **7.4.11** tạm cô lập:
+
+```text
+python -m pytest -q --disable-warnings --show-capture=no --tb=short --basetemp=data/pytest-f003-final
+488 passed, 1244 warnings in 122.24s (0:02:02); 0 skipped
+```
+
+Ruff check, Ruff format --check, git diff --check đạt. Alembic upgrade head/check
+trên SQLite và PostgreSQL tạm riêng đều báo không có upgrade operations mới.
+Không thêm migration/index; không paid smoke hoặc gọi provider thật. HTTP E2E dùng
+production graph qua ASGI/lifespan và DB thật, kiểm tra auth/422/404, paging/filter,
+history allowlist, null/zero, session isolation, lightweight queries và read-only rows.
+
+Cần restart/recreate **API** để nhận routes mới; cấu hình ADMIN_TOKEN nếu chưa có,
+dùng Swagger Authorize hoặc Postman Bearer. Không thay provider settings cho F003.
+Giới hạn còn lại: shared token không có danh tính/RBAC; public research auth giữ
+nguyên; offset/count không hứa snapshot bất biến; event retention có thể mất history;
+Unicode đặc biệt phụ thuộc locale; cost là ước lượng, null usage khác 0. Input/output
+detail giữ company text nên người dùng không đưa credential vào nội dung nghiên cứu.

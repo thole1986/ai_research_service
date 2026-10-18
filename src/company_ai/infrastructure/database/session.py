@@ -42,6 +42,14 @@ class Database:
 
             @event.listens_for(self.engine.sync_engine, "connect")
             def pragmas(connection, _):
+                # SQLite's built-in lower()/LIKE only fold ASCII. Match the
+                # administrative JSON-name search with Python's Unicode lower.
+                connection.create_function(
+                    "unicode_lower",
+                    1,
+                    lambda value: value.lower() if isinstance(value, str) else value,
+                    deterministic=True,
+                )
                 cursor = connection.cursor()
                 cursor.execute("PRAGMA journal_mode=WAL")
                 cursor.execute("PRAGMA busy_timeout=5000")
