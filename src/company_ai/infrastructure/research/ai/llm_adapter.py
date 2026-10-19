@@ -1,11 +1,13 @@
 import asyncio
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 
 from pydantic import ValidationError
 
+from company_ai.application.research.evidence import materialize_evidence
 from company_ai.application.research.prompts import messages, provider_schema, provider_wire_schema
 from company_ai.domain.research.contracts import AIResult, InvalidOutput
 from company_ai.domain.research.hashing import digest
@@ -50,7 +52,9 @@ def bounded_llm(
         messages=messages(step, payload),
         output_schema=domain_schema,
         wire_schema=(
-            provider_wire_schema(step, payload, resolved.provider) if profile else domain_schema
+            provider_wire_schema(step, payload, resolved.provider)
+            if profile or (step == "RESEARCH" and "sources" in payload)
+            else domain_schema
         ),
         schema_name=output_type.__name__,
         profile=resolved,
@@ -152,7 +156,18 @@ def bounded_llm(
                         raise InvalidOutput(
                             errors.get(response.finish_category, "INCOMPLETE_OR_REFUSED_OUTPUT")
                         )
-                    output = output_type.model_validate_json(response.content)
+                    if step == "RESEARCH" and "sources" in payload:
+                        try:
+                            raw_output = json.loads(response.content)
+                        except ValueError:
+                            raise InvalidOutput("INVALID_STRUCTURED_OUTPUT") from None
+                        if not isinstance(raw_output, dict):
+                            raise InvalidOutput("INVALID_STRUCTURED_OUTPUT")
+                        output = output_type.model_validate(
+                            materialize_evidence(raw_output, payload)
+                        )
+                    else:
+                        output = output_type.model_validate_json(response.content)
                     self.result = AIResult(
                         output=output.model_dump(),
                         tokens_input=response.tokens_input,

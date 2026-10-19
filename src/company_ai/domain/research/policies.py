@@ -41,13 +41,17 @@ def _validate_collected_evidence(output, sources):
     by_id = {source["source_id"]: source for source in sources}
     evidence = output.get("evidence", [])
     mappings = output.get("evidence_sources", [])
-    if len(by_id) != len(sources) or {item.get("quote") for item in mappings} != set(evidence):
-        raise InvalidOutput("UNSUPPORTED_EVIDENCE")
+    if len(by_id) != len(sources):
+        raise InvalidOutput("UNSUPPORTED_EVIDENCE", evidence_reason="DUPLICATE_SOURCE_ID")
+    if {item.get("quote") for item in mappings} != set(evidence):
+        raise InvalidOutput("UNSUPPORTED_EVIDENCE", evidence_reason="EVIDENCE_MAPPING_MISMATCH")
     for item in mappings:
         source = by_id.get(item.get("source_id"))
         quote = item.get("quote")
-        if not source or not quote or quote not in source["content"]:
-            raise InvalidOutput("UNSUPPORTED_EVIDENCE")
+        if source is None:
+            raise InvalidOutput("UNSUPPORTED_EVIDENCE", evidence_reason="UNKNOWN_SOURCE_ID")
+        if not quote or quote not in source["content"]:
+            raise InvalidOutput("UNSUPPORTED_EVIDENCE", evidence_reason="QUOTE_NOT_IN_SOURCE")
 
 
 def _validate_report_sources(output, payload):

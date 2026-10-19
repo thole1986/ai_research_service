@@ -61,10 +61,14 @@ class SafeFailure(Exception):
 class InvalidOutput(Exception):
     """Provider returned data which does not satisfy our contract."""
 
-    def __init__(self, category: str, *, result: AIResult | None = None):
+    def __init__(
+        self, category: str, *, result: AIResult | None = None, evidence_reason: str | None = None
+    ):
         super().__init__(category)
         # Normalized usage only; rejected raw content never belongs in exception/audit.
         self.result = result
+        # Only fixed diagnostic codes; never include quotes or source content.
+        self.evidence_reason = evidence_reason
 
 
 def output_error_category(exc):

@@ -413,7 +413,9 @@ async def _run_workflow(job_id, repo, adapter, settings, observer, workflow, col
             _record_outcome(
                 workflow, job_id, "NEEDS_REVIEW", outputs, error_code=category, level="ERROR"
             )
-            log_event("STEP_STOPPED", **fields, error_category=category)
+            evidence_reason = getattr(exc, "evidence_reason", None)
+            diagnostic = {"evidence_reason": evidence_reason} if evidence_reason else {}
+            log_event("STEP_STOPPED", **fields, error_category=category, **diagnostic)
             return
         except Exception:
             status = "FAILED" if name == "SCORE" else "UNKNOWN"
